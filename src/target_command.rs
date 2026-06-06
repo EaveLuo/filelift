@@ -3,7 +3,10 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 
 use crate::{
-    cli::{TargetAddCommand, TargetCommands, TargetRemoveCommand, TargetUseCommand},
+    cli::{
+        TargetAddCommand, TargetCommands, TargetRemoveCommand, TargetUpdateCommand,
+        TargetUseCommand,
+    },
     diagnostic_log, i18n, output, secret, storage,
     target::{TargetStore, UploadTarget},
 };
@@ -11,6 +14,7 @@ use crate::{
 pub async fn run(command: TargetCommands) -> Result<()> {
     match command {
         TargetCommands::Add(command) => add(command).await,
+        TargetCommands::Update(command) => update(command).await,
         TargetCommands::List => list(),
         TargetCommands::Use(command) => use_target(command),
         TargetCommands::Remove(command) => remove(command),
@@ -20,6 +24,10 @@ pub async fn run(command: TargetCommands) -> Result<()> {
 async fn add(command: TargetAddCommand) -> Result<()> {
     let mut store = TargetStore::load()?;
     let name = command.name;
+    anyhow::ensure!(
+        !store.targets.contains_key(&name),
+        "target `{name}` already exists; use `filelift target update {name}` to change it"
+    );
     let should_prompt_region =
         command.bucket.is_none() || command.endpoint.is_none() || command.public_base_url.is_none();
     let bucket = prompt_required(command.bucket, &i18n::t("prompt-bucket"))?;
@@ -35,10 +43,9 @@ async fn add(command: TargetAddCommand) -> Result<()> {
     let credentials = prompt_credentials(
         command.access_key_id,
         command.secret_access_key,
-        should_prompt_region,
+        CredentialPromptMode::Require,
     )?;
-    let connectivity_credentials =
-        resolve_connectivity_credentials(credentials.clone(), || secret::credentials(&name))?;
+    let connectivity_credentials = credentials.clone().map(credentials_from_pair);
     let target = UploadTarget {
         provider: command.provider,
         bucket,
@@ -63,6 +70,108 @@ async fn add(command: TargetAddCommand) -> Result<()> {
     diagnostic_log::record_command_result("target add", Some(&name), "success");
     println!("{}", i18n::t_args("target-added", &[("name", &name)]));
     Ok(())
+}
+
+async fn update(command: TargetUpdateCommand) -> Result<()> {
+    let mut store = TargetStore::load()?;
+    let should_prompt_metadata = should_prompt_update_metadata(&command);
+    let name = command.name;
+    let existing = store
+        .targets
+        .get(&name)
+        .with_context(|| format!("target `{name}` does not exist"))?;
+
+    let provider = resolve_update_field(
+        command.provider,
+        &i18n::t("prompt-provider"),
+        &existing.provider,
+        should_prompt_metadata,
+    )?;
+    let bucket = resolve_update_field(
+        command.bucket,
+        &i18n::t("prompt-bucket"),
+        &existing.bucket,
+        should_prompt_metadata,
+    )?;
+    let endpoint = resolve_update_field(
+        command.endpoint,
+        &i18n::t("prompt-endpoint"),
+        &existing.endpoint,
+        should_prompt_metadata,
+    )?;
+    let region = resolve_update_field(
+        command.region,
+        &i18n::t("prompt-region"),
+        &existing.region,
+        should_prompt_metadata,
+    )?;
+    let public_base_url = resolve_update_field(
+        command.public_base_url,
+        &i18n::t("prompt-public-base-url"),
+        &existing.public_base_url,
+        should_prompt_metadata,
+    )?;
+    let public_base_url = output::normalize_public_base_url(&public_base_url)?;
+    let credentials = prompt_credentials(
+        command.access_key_id,
+        command.secret_access_key,
+        CredentialPromptMode::PromptWhenMissingSaved {
+            has_saved_credentials: secret::credentials(&name).is_ok(),
+        },
+    )?;
+    let connectivity_credentials =
+        resolve_connectivity_credentials(credentials.clone(), || secret::credentials(&name))?;
+    let target = UploadTarget {
+        provider,
+        bucket,
+        endpoint,
+        region,
+        public_base_url,
+    };
+
+    check_target_connectivity(&target, connectivity_credentials, command.skip_check).await?;
+
+    store.targets.insert(name.clone(), target);
+
+    if let Some((access_key_id, secret_access_key)) = credentials {
+        secret::set_credentials(&name, &access_key_id, &secret_access_key)?;
+    }
+
+    if command.set_default {
+        store.default_target = Some(name.clone());
+    }
+
+    store.save()?;
+    diagnostic_log::record_command_result("target update", Some(&name), "success");
+    println!("{}", i18n::t_args("target-updated", &[("name", &name)]));
+    Ok(())
+}
+
+fn should_prompt_update_metadata(command: &TargetUpdateCommand) -> bool {
+    command.provider.is_none()
+        && command.bucket.is_none()
+        && command.endpoint.is_none()
+        && command.region.is_none()
+        && command.public_base_url.is_none()
+        && command.access_key_id.is_none()
+        && command.secret_access_key.is_none()
+}
+
+fn resolve_update_field(
+    value: Option<String>,
+    label: &str,
+    current: &str,
+    should_prompt: bool,
+) -> Result<String> {
+    if let Some(value) = value {
+        return Ok(value);
+    }
+
+    if should_prompt {
+        return prompt_existing_default(label, current);
+    }
+
+    Ok(current.to_string())
 }
 
 async fn check_target_connectivity(
@@ -91,13 +200,22 @@ fn resolve_connectivity_credentials(
     load_saved: impl FnOnce() -> Result<secret::Credentials>,
 ) -> Result<Option<secret::Credentials>> {
     if let Some((access_key_id, secret_access_key)) = provided {
-        return Ok(Some(secret::Credentials {
+        return Ok(Some(credentials_from_pair((
             access_key_id,
             secret_access_key,
-        }));
+        ))));
     }
 
     Ok(load_saved().ok())
+}
+
+fn credentials_from_pair(
+    (access_key_id, secret_access_key): (String, String),
+) -> secret::Credentials {
+    secret::Credentials {
+        access_key_id,
+        secret_access_key,
+    }
 }
 
 fn prompt_required(value: Option<String>, label: &str) -> Result<String> {
@@ -131,10 +249,19 @@ fn prompt_with_default(value: Option<String>, label: &str, default: &str) -> Res
     }
 }
 
+fn prompt_existing_default(label: &str, current: &str) -> Result<String> {
+    let answer = prompt_line(&format!("{label} [{current}]: "))?;
+    if answer.is_empty() {
+        Ok(current.to_string())
+    } else {
+        Ok(answer)
+    }
+}
+
 fn prompt_credentials(
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
-    should_prompt_empty_credentials: bool,
+    mode: CredentialPromptMode,
 ) -> Result<Option<(String, String)>> {
     match (access_key_id, secret_access_key) {
         (Some(access_key_id), Some(secret_access_key)) => {
@@ -148,37 +275,28 @@ fn prompt_credentials(
             prompt_required(None, &i18n::t("prompt-access-key-id"))?,
             secret_access_key,
         ))),
-        (None, None) if should_prompt_empty_credentials => {
-            if prompt_yes_no(&i18n::t("prompt-save-access-keys-now"), true)? {
-                Ok(Some((
-                    prompt_required(None, &i18n::t("prompt-access-key-id"))?,
-                    prompt_password(&i18n::t("prompt-secret-access-key"))?,
-                )))
-            } else {
-                Ok(None)
-            }
-        }
+        (None, None) if mode.should_prompt_for_missing_credentials() => Ok(Some((
+            prompt_required(None, &i18n::t("prompt-access-key-id"))?,
+            prompt_password(&i18n::t("prompt-secret-access-key"))?,
+        ))),
         (None, None) => Ok(None),
     }
 }
 
-fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
-    loop {
-        let answer = prompt_line(label)?;
-        if let Some(value) = parse_yes_no_answer(&answer, default) {
-            return Ok(value);
-        }
-
-        println!("{}", i18n::t("prompt-please-answer-yes-no"));
-    }
+#[derive(Debug, Clone, Copy)]
+enum CredentialPromptMode {
+    Require,
+    PromptWhenMissingSaved { has_saved_credentials: bool },
 }
 
-fn parse_yes_no_answer(answer: &str, default: bool) -> Option<bool> {
-    match answer.to_ascii_lowercase().as_str() {
-        "" => Some(default),
-        "n" | "no" => Some(false),
-        "y" | "yes" => Some(true),
-        _ => None,
+impl CredentialPromptMode {
+    fn should_prompt_for_missing_credentials(self) -> bool {
+        match self {
+            Self::Require => true,
+            Self::PromptWhenMissingSaved {
+                has_saved_credentials,
+            } => !has_saved_credentials,
+        }
     }
 }
 
@@ -307,11 +425,5 @@ mod tests {
                 .unwrap();
 
         assert!(credentials.is_none());
-    }
-
-    #[test]
-    fn empty_yes_no_answer_uses_default() {
-        assert_eq!(parse_yes_no_answer("", true), Some(true));
-        assert_eq!(parse_yes_no_answer("", false), Some(false));
     }
 }

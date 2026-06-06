@@ -90,6 +90,9 @@ pub fn localize_command(command: Command) -> Command {
             command
                 .about(t("cmd-target-about"))
                 .mut_subcommand("add", |command| command.about(t("cmd-target-add-about")))
+                .mut_subcommand("update", |command| {
+                    command.about(t("cmd-target-update-about"))
+                })
                 .mut_subcommand("list", |command| command.about(t("cmd-target-list-about")))
                 .mut_subcommand("use", |command| command.about(t("cmd-target-use-about")))
                 .mut_subcommand("remove", |command| {

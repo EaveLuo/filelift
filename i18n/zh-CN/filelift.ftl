@@ -3,7 +3,8 @@ cmd-target-about = 管理上传 target
 cmd-upload-about = 上传文件或目录
 cmd-log-about = 管理诊断日志
 cmd-language-about = 管理 CLI 语言
-cmd-target-add-about = 添加或更新上传 target
+cmd-target-add-about = 添加上传 target
+cmd-target-update-about = 更新上传 target
 cmd-target-list-about = 列出已配置的上传 target
 cmd-target-use-about = 设置默认上传 target
 cmd-target-remove-about = 移除上传 target
@@ -13,6 +14,7 @@ cmd-language-show-about = 显示当前 CLI 语言
 cmd-language-use-about = 设置 CLI 语言
 
 prompt-bucket = 存储桶
+prompt-provider = 提供商
 prompt-endpoint = 端点
 prompt-region = 区域
 prompt-public-base-url = 公开访问基础 URL
@@ -23,6 +25,7 @@ prompt-please-answer-yes-no = 请输入 y 或 n。
 prompt-cannot-be-empty = { $label } 不能为空。
 
 target-added = 已添加 target `{ $name }`。
+target-updated = 已更新 target `{ $name }`。
 target-using = 正在使用 target `{ $name }`。
 target-removed = 已移除 target `{ $name }`。
 target-no-targets-configured = 还没有配置 target。
@@ -35,4 +38,4 @@ language-current = 当前语言：{ $language }
 log-exported = 已导出诊断日志到 { $path }（{ $count } 条事件）。分享前请先检查内容。
 log-cleared = 已清空诊断日志。
 
-upload-missing-credentials = target `{ $target }` 缺少访问凭证；请运行 `filelift target add { $target }` 并选择保存访问密钥。
+upload-missing-credentials = target `{ $target }` 缺少访问凭证；请运行 `filelift target update { $target }` 保存访问密钥。
