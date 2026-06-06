@@ -149,7 +149,7 @@ fn prompt_credentials(
             secret_access_key,
         ))),
         (None, None) if should_prompt_empty_credentials => {
-            if prompt_yes_no(&i18n::t("prompt-save-access-keys-now"))? {
+            if prompt_yes_no(&i18n::t("prompt-save-access-keys-now"), true)? {
                 Ok(Some((
                     prompt_required(None, &i18n::t("prompt-access-key-id"))?,
                     prompt_password(&i18n::t("prompt-secret-access-key"))?,
@@ -162,14 +162,23 @@ fn prompt_credentials(
     }
 }
 
-fn prompt_yes_no(label: &str) -> Result<bool> {
+fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
     loop {
         let answer = prompt_line(label)?;
-        match answer.to_ascii_lowercase().as_str() {
-            "" | "n" | "no" => return Ok(false),
-            "y" | "yes" => return Ok(true),
-            _ => println!("{}", i18n::t("prompt-please-answer-yes-no")),
+        if let Some(value) = parse_yes_no_answer(&answer, default) {
+            return Ok(value);
         }
+
+        println!("{}", i18n::t("prompt-please-answer-yes-no"));
+    }
+}
+
+fn parse_yes_no_answer(answer: &str, default: bool) -> Option<bool> {
+    match answer.to_ascii_lowercase().as_str() {
+        "" => Some(default),
+        "n" | "no" => Some(false),
+        "y" | "yes" => Some(true),
+        _ => None,
     }
 }
 
@@ -298,5 +307,11 @@ mod tests {
                 .unwrap();
 
         assert!(credentials.is_none());
+    }
+
+    #[test]
+    fn empty_yes_no_answer_uses_default() {
+        assert_eq!(parse_yes_no_answer("", true), Some(true));
+        assert_eq!(parse_yes_no_answer("", false), Some(false));
     }
 }

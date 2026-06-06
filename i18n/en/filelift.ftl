@@ -18,7 +18,7 @@ prompt-region = Region
 prompt-public-base-url = Public base URL
 prompt-access-key-id = Access key ID
 prompt-secret-access-key = Secret access key
-prompt-save-access-keys-now = Save access keys now? [y/N]: 
+prompt-save-access-keys-now = Save access keys now? [Y/n]: 
 prompt-please-answer-yes-no = Please answer y or n.
 prompt-cannot-be-empty = { $label } cannot be empty.
 
@@ -34,3 +34,5 @@ language-current = Current language: { $language }
 
 log-exported = Exported diagnostic log to { $path } ({ $count } events). Review it before sharing.
 log-cleared = Cleared diagnostic logs.
+
+upload-missing-credentials = Missing credentials for target `{ $target }`; run `filelift target add { $target }` and choose to save access keys.

@@ -18,7 +18,7 @@ prompt-region = 区域
 prompt-public-base-url = 公开访问基础 URL
 prompt-access-key-id = Access key ID
 prompt-secret-access-key = Secret access key
-prompt-save-access-keys-now = 现在保存访问密钥吗？[y/N]: 
+prompt-save-access-keys-now = 现在保存访问密钥吗？[Y/n]: 
 prompt-please-answer-yes-no = 请输入 y 或 n。
 prompt-cannot-be-empty = { $label } 不能为空。
 
@@ -34,3 +34,5 @@ language-current = 当前语言：{ $language }
 
 log-exported = 已导出诊断日志到 { $path }（{ $count } 条事件）。分享前请先检查内容。
 log-cleared = 已清空诊断日志。
+
+upload-missing-credentials = target `{ $target }` 缺少访问凭证；请运行 `filelift target add { $target }` 并选择保存访问密钥。
