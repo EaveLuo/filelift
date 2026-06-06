@@ -37,6 +37,8 @@ async fn add(command: TargetAddCommand) -> Result<()> {
         command.secret_access_key,
         should_prompt_region,
     )?;
+    let connectivity_credentials =
+        resolve_connectivity_credentials(credentials.clone(), || secret::credentials(&name))?;
     let target = UploadTarget {
         provider: command.provider,
         bucket,
@@ -45,7 +47,7 @@ async fn add(command: TargetAddCommand) -> Result<()> {
         public_base_url,
     };
 
-    check_target_connectivity(&target, credentials.clone(), command.skip_check).await?;
+    check_target_connectivity(&target, connectivity_credentials, command.skip_check).await?;
 
     store.targets.insert(name.clone(), target);
 
@@ -65,30 +67,37 @@ async fn add(command: TargetAddCommand) -> Result<()> {
 
 async fn check_target_connectivity(
     target: &UploadTarget,
-    credentials: Option<(String, String)>,
+    credentials: Option<secret::Credentials>,
     skip_check: bool,
 ) -> Result<()> {
     if skip_check {
         return Ok(());
     }
 
-    let Some((access_key_id, secret_access_key)) = credentials else {
+    let Some(credentials) = credentials else {
         println!("{}", i18n::t("target-connectivity-skipped-no-credentials"));
         return Ok(());
     };
 
     println!("{}", i18n::t("target-checking-connectivity"));
-    let client = storage::s3::Client::new(
-        target.clone(),
-        secret::Credentials {
-            access_key_id,
-            secret_access_key,
-        },
-    )
-    .await?;
+    let client = storage::s3::Client::new(target.clone(), credentials).await?;
     client.check_connectivity().await?;
     println!("{}", i18n::t("target-connectivity-passed"));
     Ok(())
+}
+
+fn resolve_connectivity_credentials(
+    provided: Option<(String, String)>,
+    load_saved: impl FnOnce() -> Result<secret::Credentials>,
+) -> Result<Option<secret::Credentials>> {
+    if let Some((access_key_id, secret_access_key)) = provided {
+        return Ok(Some(secret::Credentials {
+            access_key_id,
+            secret_access_key,
+        }));
+    }
+
+    Ok(load_saved().ok())
 }
 
 fn prompt_required(value: Option<String>, label: &str) -> Result<String> {
@@ -248,4 +257,46 @@ fn remove(command: TargetRemoveCommand) -> Result<()> {
         i18n::t_args("target-removed", &[("name", &command.name)])
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provided_credentials_are_used_for_connectivity_check() {
+        let credentials = resolve_connectivity_credentials(
+            Some(("new-id".to_string(), "new-secret".to_string())),
+            || anyhow::bail!("saved credentials should not be loaded"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(credentials.access_key_id, "new-id");
+        assert_eq!(credentials.secret_access_key, "new-secret");
+    }
+
+    #[test]
+    fn saved_credentials_are_reused_for_connectivity_check() {
+        let credentials = resolve_connectivity_credentials(None, || {
+            Ok(secret::Credentials {
+                access_key_id: "saved-id".to_string(),
+                secret_access_key: "saved-secret".to_string(),
+            })
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(credentials.access_key_id, "saved-id");
+        assert_eq!(credentials.secret_access_key, "saved-secret");
+    }
+
+    #[test]
+    fn missing_saved_credentials_skip_connectivity_check() {
+        let credentials =
+            resolve_connectivity_credentials(None, || anyhow::bail!("missing saved credentials"))
+                .unwrap();
+
+        assert!(credentials.is_none());
+    }
 }
