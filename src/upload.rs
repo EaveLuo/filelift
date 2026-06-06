@@ -3,7 +3,7 @@ use std::fs;
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::{cli::UploadCommand, output, secret, storage, target::TargetStore};
+use crate::{cli::UploadCommand, i18n, output, secret, storage, target::TargetStore};
 
 pub async fn run(command: UploadCommand) -> Result<()> {
     let recursive = command.recursive;
@@ -40,7 +40,9 @@ pub async fn run(command: UploadCommand) -> Result<()> {
     let credentials = if command.dry_run {
         None
     } else {
-        Some(secret::credentials(&target_name)?)
+        Some(secret::credentials(&target_name).with_context(|| {
+            i18n::t_args("upload-missing-credentials", &[("target", &target_name)])
+        })?)
     };
 
     let client = if let Some(credentials) = credentials {

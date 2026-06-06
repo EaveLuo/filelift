@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::{
     cli::{LogCommands, LogExportCommand},
-    diagnostic_log,
+    diagnostic_log, i18n,
 };
 
 pub fn run(command: LogCommands) -> Result<()> {
@@ -14,15 +14,19 @@ pub fn run(command: LogCommands) -> Result<()> {
 
 fn export(command: LogExportCommand) -> Result<()> {
     let count = diagnostic_log::export_to(command.output.as_std_path())?;
+    let count = count.to_string();
     println!(
-        "Exported diagnostic log to {} ({count} events). Review it before sharing.",
-        command.output
+        "{}",
+        i18n::t_args(
+            "log-exported",
+            &[("path", command.output.as_str()), ("count", &count)]
+        )
     );
     Ok(())
 }
 
 fn clear() -> Result<()> {
     diagnostic_log::clear()?;
-    println!("Cleared diagnostic logs.");
+    println!("{}", i18n::t("log-cleared"));
     Ok(())
 }
