@@ -11,9 +11,9 @@ articles, docs, release notes, or websites.
 
 1. Upload local files to S3-compatible object storage.
 2. Upload directories recursively for batch publishing.
-3. Support multiple named configs across platforms and buckets.
+3. Support multiple named targets across platforms and buckets.
 4. Keep secrets encrypted by delegating to the OS keyring.
-5. Generate deterministic public URLs from config metadata and object keys.
+5. Generate deterministic public URLs from target metadata and object keys.
 
 ## Storage Strategy
 
@@ -32,7 +32,7 @@ This keeps behavior predictable across providers.
 
 ## Secret Strategy
 
-The config file stores storage metadata only. Credentials are stored under the
+The config file stores upload target metadata only. Credentials are stored under the
 `filelift` service in the operating system keyring. This gives native encrypted
 storage on Windows Credential Manager, macOS Keychain, and Linux Secret Service
 where available.
@@ -43,16 +43,16 @@ error rather than silently writing secrets to disk.
 ## Command Model
 
 ```text
-filelift config add <name>
-filelift config list
-filelift config use <name>
-filelift config remove <name>
+filelift target add <name>
+filelift target list
+filelift target use <name>
+filelift target remove <name>
 filelift upload <path>
 ```
 
 Upload options:
 
-- `--config <name>` overrides the default config.
+- `--target <name>` overrides the default target.
 - `--prefix <path>` chooses the remote key prefix.
 - `--recursive` allows directory upload.
 - `--name <name>` renames a single uploaded file.
@@ -61,7 +61,7 @@ Upload options:
 
 ## Milestones
 
-1. CLI skeleton and storage config.
+1. CLI skeleton and upload targets.
 2. Keyring-backed credentials.
 3. Dry-run path planning and URL generation.
 4. S3-compatible upload.

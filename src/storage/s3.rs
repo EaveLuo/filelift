@@ -4,7 +4,7 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::{config::Region, primitives::ByteStream};
 use camino::Utf8Path;
 
-use crate::{config::StorageConfig, secret};
+use crate::{config::UploadTarget, secret};
 
 pub struct Client {
     inner: aws_sdk_s3::Client,
@@ -12,7 +12,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn new(config: StorageConfig, credentials: secret::Credentials) -> Result<Self> {
+    pub async fn new(target: UploadTarget, credentials: secret::Credentials) -> Result<Self> {
         let sdk_credentials = Credentials::new(
             credentials.access_key_id,
             credentials.secret_access_key,
@@ -23,8 +23,8 @@ impl Client {
 
         let sdk_config = aws_config::defaults(BehaviorVersion::latest())
             .credentials_provider(sdk_credentials)
-            .region(Region::new(config.region))
-            .endpoint_url(config.endpoint)
+            .region(Region::new(target.region))
+            .endpoint_url(target.endpoint)
             .load()
             .await;
 
@@ -32,7 +32,7 @@ impl Client {
 
         Ok(Self {
             inner,
-            bucket: config.bucket,
+            bucket: target.bucket,
         })
     }
 

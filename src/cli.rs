@@ -10,27 +10,27 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    #[command(about = "Manage storage configs")]
+    #[command(about = "Manage upload targets")]
     #[command(subcommand)]
-    Config(ConfigCommands),
+    Target(TargetCommands),
     #[command(about = "Upload a file or directory")]
     Upload(UploadCommand),
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ConfigCommands {
-    #[command(about = "Add or update a storage config")]
-    Add(ConfigAddCommand),
-    #[command(about = "List configured storage configs")]
+pub enum TargetCommands {
+    #[command(about = "Add or update an upload target")]
+    Add(TargetAddCommand),
+    #[command(about = "List configured upload targets")]
     List,
-    #[command(about = "Set the default storage config")]
-    Use(ConfigUseCommand),
-    #[command(about = "Remove a storage config")]
-    Remove(ConfigRemoveCommand),
+    #[command(about = "Set the default upload target")]
+    Use(TargetUseCommand),
+    #[command(about = "Remove an upload target")]
+    Remove(TargetRemoveCommand),
 }
 
 #[derive(Debug, Args)]
-pub struct ConfigAddCommand {
+pub struct TargetAddCommand {
     pub name: String,
     #[arg(long, default_value = "s3")]
     pub provider: String,
@@ -51,12 +51,12 @@ pub struct ConfigAddCommand {
 }
 
 #[derive(Debug, Args)]
-pub struct ConfigUseCommand {
+pub struct TargetUseCommand {
     pub name: String,
 }
 
 #[derive(Debug, Args)]
-pub struct ConfigRemoveCommand {
+pub struct TargetRemoveCommand {
     pub name: String,
 }
 
@@ -64,7 +64,7 @@ pub struct ConfigRemoveCommand {
 pub struct UploadCommand {
     pub path: Utf8PathBuf,
     #[arg(long)]
-    pub config: Option<String>,
+    pub target: Option<String>,
     #[arg(long)]
     pub prefix: Option<String>,
     #[arg(long)]

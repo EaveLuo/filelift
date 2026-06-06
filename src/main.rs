@@ -1,9 +1,9 @@
 mod cli;
 mod config;
-mod config_command;
 mod output;
 mod secret;
 mod storage;
+mod target_command;
 mod upload;
 
 use anyhow::Result;
@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Config(command) => config_command::run(command)?,
+        Commands::Target(command) => target_command::run(command)?,
         Commands::Upload(command) => upload::run(command).await?,
     }
 
