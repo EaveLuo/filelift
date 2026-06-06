@@ -15,6 +15,9 @@ pub enum Commands {
     Target(TargetCommands),
     #[command(about = "Upload a file or directory")]
     Upload(UploadCommand),
+    #[command(about = "Manage diagnostic logs")]
+    #[command(subcommand)]
+    Log(LogCommands),
 }
 
 #[derive(Debug, Subcommand)]
@@ -29,19 +32,33 @@ pub enum TargetCommands {
     Remove(TargetRemoveCommand),
 }
 
+#[derive(Debug, Subcommand)]
+pub enum LogCommands {
+    #[command(about = "Export decrypted diagnostic logs")]
+    Export(LogExportCommand),
+    #[command(about = "Clear encrypted diagnostic logs")]
+    Clear,
+}
+
+#[derive(Debug, Args)]
+pub struct LogExportCommand {
+    #[arg(long, default_value = "filelift-debug-log.jsonl")]
+    pub output: Utf8PathBuf,
+}
+
 #[derive(Debug, Args)]
 pub struct TargetAddCommand {
     pub name: String,
     #[arg(long, default_value = "s3")]
     pub provider: String,
     #[arg(long)]
-    pub bucket: String,
+    pub bucket: Option<String>,
     #[arg(long)]
-    pub endpoint: String,
-    #[arg(long, default_value = "auto")]
-    pub region: String,
+    pub endpoint: Option<String>,
     #[arg(long)]
-    pub public_base_url: String,
+    pub region: Option<String>,
+    #[arg(long)]
+    pub public_base_url: Option<String>,
     #[arg(long)]
     pub access_key_id: Option<String>,
     #[arg(long)]

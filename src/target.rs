@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs};
+use std::{collections::BTreeMap, env, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
@@ -55,14 +55,21 @@ impl TargetStore {
 }
 
 pub fn target_store_path() -> Result<Utf8PathBuf> {
-    let target_dir = dirs::config_dir().context("could not resolve user target store directory")?;
-    let path = target_dir.join("filelift").join("targets.toml");
+    let path = filelift_home_dir()?.join("targets.toml");
     Utf8PathBuf::from_path_buf(path).map_err(|path| {
         anyhow::anyhow!(
             "target store path contains non-UTF-8 characters: {}",
             path.display()
         )
     })
+}
+
+pub fn filelift_home_dir() -> Result<PathBuf> {
+    let home_dir = env::var_os("FILELIFT_HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .context("could not resolve user home directory")?;
+    Ok(home_dir.join(".filelift"))
 }
 
 #[cfg(test)]
