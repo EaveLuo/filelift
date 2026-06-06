@@ -26,11 +26,14 @@ filelift target add r2-blog \
 filelift target use r2-blog
 filelift upload ./cover.webp --prefix blog/2026/my-post --markdown
 filelift upload ./assets --recursive --prefix blog/2026/my-post
+filelift log export --output filelift-debug-log.jsonl
 ```
 
 ## Target Store
 
 Targets contain non-secret storage metadata:
+
+The target store is saved at `~/.filelift/targets.toml`.
 
 ```toml
 default_target = "r2-blog"
@@ -49,11 +52,27 @@ Access keys are stored separately in the system keyring:
 - account: `<target-name>:access_key_id`
 - account: `<target-name>:secret_access_key`
 
+## Diagnostic Logs
+
+`filelift` writes encrypted diagnostic logs to `~/.filelift/logs/events.log.enc`.
+The log encryption key is stored in the operating system keyring. Logs can be
+exported to a readable JSONL file for troubleshooting:
+
+```bash
+filelift log export --output filelift-debug-log.jsonl
+filelift log clear
+```
+
+Review exported logs before sharing them. Secrets are redacted and are never
+written to the encrypted log intentionally.
+
 ## Architecture
 
 - `cli`: command definitions and argument parsing.
 - `target`: target store load/save.
 - `secret`: keyring integration.
+- `diagnostic_log`: encrypted diagnostic logging and export.
+- `log_command`: diagnostic log command handlers.
 - `target_command`: target command handlers.
 - `storage`: storage provider interface.
 - `storage::s3`: S3-compatible upload implementation.

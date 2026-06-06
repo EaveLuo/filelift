@@ -11,6 +11,9 @@ Code changes should include:
 
 - Unit tests for changed module logic.
 - Integration tests for changed CLI behavior.
+- `tracing` diagnostic events when useful for troubleshooting, without logging
+  access keys, secret keys, authorization headers, passwords, tokens, or file
+  contents.
 - A passing local verification run.
 
 Run these before opening a pull request:

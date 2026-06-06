@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use keyring_core::{Entry, Error};
 
 const SERVICE: &str = "filelift";
+const DIAGNOSTIC_LOG_KEY_ACCOUNT: &str = "diagnostic_log_key";
 
 pub fn set_credentials(
     target_name: &str,
@@ -27,6 +28,14 @@ pub fn delete_credentials(target_name: &str) -> Result<()> {
     delete_secret(&secret_account(target_name, "access_key_id"))?;
     delete_secret(&secret_account(target_name, "secret_access_key"))?;
     Ok(())
+}
+
+pub fn diagnostic_log_key() -> Result<String> {
+    get_secret(DIAGNOSTIC_LOG_KEY_ACCOUNT)
+}
+
+pub fn set_diagnostic_log_key(value: &str) -> Result<()> {
+    set_secret(DIAGNOSTIC_LOG_KEY_ACCOUNT, value)
 }
 
 #[derive(Debug, Clone)]

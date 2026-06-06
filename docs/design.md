@@ -14,6 +14,7 @@ articles, docs, release notes, or websites.
 3. Support multiple named targets across platforms and buckets.
 4. Keep secrets encrypted by delegating to the OS keyring.
 5. Generate deterministic public URLs from target metadata and object keys.
+6. Keep encrypted diagnostic logs that users can export when reporting issues.
 
 ## Storage Strategy
 
@@ -40,6 +41,28 @@ where available.
 If keyring support fails on a platform, the CLI should return an actionable
 error rather than silently writing secrets to disk.
 
+## Diagnostic Log Strategy
+
+The CLI records structured diagnostic events through `tracing`. Business code
+uses standard `tracing::info!`, `tracing::warn!`, and `tracing::error!` calls;
+the filelift diagnostic layer handles encrypted local storage.
+
+Logs are appended to `~/.filelift/logs/events.log.enc`. Each event is encrypted
+independently with a random nonce so the CLI can append events without reading
+and rewriting the full log. The log encryption key is stored in the operating
+system keyring under the `filelift` service.
+
+Users export readable troubleshooting logs explicitly:
+
+```text
+filelift log export --output filelift-debug-log.jsonl
+filelift log clear
+```
+
+Exported logs are JSONL and should be reviewed before sharing. Secrets such as
+access keys, secret keys, authorization headers, passwords, and tokens are
+redacted.
+
 ## Command Model
 
 ```text
@@ -48,6 +71,8 @@ filelift target list
 filelift target use <name>
 filelift target remove <name>
 filelift upload <path>
+filelift log export
+filelift log clear
 ```
 
 Upload options:

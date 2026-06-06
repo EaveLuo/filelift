@@ -6,6 +6,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::{cli::UploadCommand, output, secret, storage, target::TargetStore};
 
 pub async fn run(command: UploadCommand) -> Result<()> {
+    let recursive = command.recursive;
+    let dry_run = command.dry_run;
+    let markdown = command.markdown;
     let store = TargetStore::load()?;
     let target_name = store.active_target_name(command.target.as_deref())?;
     let target = store
@@ -22,6 +25,17 @@ pub async fn run(command: UploadCommand) -> Result<()> {
     if items.is_empty() {
         bail!("no files matched upload input");
     }
+    let upload_count = items.len() as u64;
+    tracing::info!(
+        command = "upload",
+        target = %target_name,
+        recursive,
+        dry_run,
+        markdown,
+        upload_count,
+        result = "planned",
+        "upload planned"
+    );
 
     let credentials = if command.dry_run {
         None
@@ -52,6 +66,17 @@ pub async fn run(command: UploadCommand) -> Result<()> {
             println!("{url}");
         }
     }
+
+    tracing::info!(
+        command = "upload",
+        target = %target_name,
+        recursive,
+        dry_run,
+        markdown,
+        upload_count,
+        result = "success",
+        "upload finished"
+    );
 
     Ok(())
 }
