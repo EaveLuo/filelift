@@ -3,12 +3,12 @@ use std::fs;
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::{cli::UploadCommand, config::Config, output, secret, storage};
+use crate::{cli::UploadCommand, output, secret, storage, target::TargetStore};
 
 pub async fn run(command: UploadCommand) -> Result<()> {
-    let config = Config::load()?;
-    let target_name = config.active_target_name(command.target.as_deref())?;
-    let target = config
+    let store = TargetStore::load()?;
+    let target_name = store.active_target_name(command.target.as_deref())?;
+    let target = store
         .targets
         .get(&target_name)
         .with_context(|| format!("target `{target_name}` does not exist"))?;

@@ -32,8 +32,8 @@ This keeps behavior predictable across providers.
 
 ## Secret Strategy
 
-The config file stores upload target metadata only. Credentials are stored under the
-`filelift` service in the operating system keyring. This gives native encrypted
+The target store file keeps upload target metadata only. Credentials are stored
+under the `filelift` service in the operating system keyring. This gives native encrypted
 storage on Windows Credential Manager, macOS Keychain, and Linux Secret Service
 where available.
 

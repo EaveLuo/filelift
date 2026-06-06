@@ -5,7 +5,7 @@ use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Config {
+pub struct TargetStore {
     pub default_target: Option<String>,
     #[serde(default)]
     pub targets: BTreeMap<String, UploadTarget>,
@@ -20,27 +20,27 @@ pub struct UploadTarget {
     pub public_base_url: String,
 }
 
-impl Config {
+impl TargetStore {
     pub fn load() -> Result<Self> {
-        let path = config_path()?;
+        let path = target_store_path()?;
         if !path.exists() {
             return Ok(Self::default());
         }
 
         let content = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read config at {path}"))?;
-        toml::from_str(&content).with_context(|| format!("failed to parse config at {path}"))
+            .with_context(|| format!("failed to read target store at {path}"))?;
+        toml::from_str(&content).with_context(|| format!("failed to parse target store at {path}"))
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = config_path()?;
+        let path = target_store_path()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create config directory at {parent}"))?;
+                .with_context(|| format!("failed to create target store directory at {parent}"))?;
         }
 
-        let content = toml::to_string_pretty(self).context("failed to serialize config")?;
-        fs::write(&path, content).with_context(|| format!("failed to write config at {path}"))
+        let content = toml::to_string_pretty(self).context("failed to serialize target store")?;
+        fs::write(&path, content).with_context(|| format!("failed to write target store at {path}"))
     }
 
     pub fn active_target_name(&self, override_name: Option<&str>) -> Result<String> {
@@ -54,12 +54,12 @@ impl Config {
     }
 }
 
-pub fn config_path() -> Result<Utf8PathBuf> {
-    let config_dir = dirs::config_dir().context("could not resolve user config directory")?;
-    let path = config_dir.join("filelift").join("config.toml");
+pub fn target_store_path() -> Result<Utf8PathBuf> {
+    let target_dir = dirs::config_dir().context("could not resolve user target store directory")?;
+    let path = target_dir.join("filelift").join("targets.toml");
     Utf8PathBuf::from_path_buf(path).map_err(|path| {
         anyhow::anyhow!(
-            "config path contains non-UTF-8 characters: {}",
+            "target store path contains non-UTF-8 characters: {}",
             path.display()
         )
     })

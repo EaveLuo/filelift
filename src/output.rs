@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use url::Url;
 
-use crate::config::UploadTarget;
+use crate::target::UploadTarget;
 
 pub fn public_url(target: &UploadTarget, key: &str) -> Result<String> {
     let mut base = Url::parse(&target.public_base_url)

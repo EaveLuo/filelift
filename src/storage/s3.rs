@@ -4,7 +4,7 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::{config::Region, primitives::ByteStream};
 use camino::Utf8Path;
 
-use crate::{config::UploadTarget, secret};
+use crate::{secret, target::UploadTarget};
 
 pub struct Client {
     inner: aws_sdk_s3::Client,

@@ -1,8 +1,8 @@
 mod cli;
-mod config;
 mod output;
 mod secret;
 mod storage;
+mod target;
 mod target_command;
 mod upload;
 

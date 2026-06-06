@@ -28,7 +28,7 @@ filelift upload ./cover.webp --prefix blog/2026/my-post --markdown
 filelift upload ./assets --recursive --prefix blog/2026/my-post
 ```
 
-## Target Model
+## Target Store
 
 Targets contain non-secret storage metadata:
 
@@ -52,7 +52,7 @@ Access keys are stored separately in the system keyring:
 ## Architecture
 
 - `cli`: command definitions and argument parsing.
-- `config`: config file load/save.
+- `target`: target store load/save.
 - `secret`: keyring integration.
 - `target_command`: target command handlers.
 - `storage`: storage provider interface.
