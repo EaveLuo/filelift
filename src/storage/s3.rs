@@ -54,4 +54,15 @@ impl Client {
 
         Ok(())
     }
+
+    pub async fn check_connectivity(&self) -> Result<()> {
+        self.inner
+            .head_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .context("target connectivity check failed")?;
+
+        Ok(())
+    }
 }

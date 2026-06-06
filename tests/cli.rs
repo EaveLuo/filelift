@@ -13,10 +13,34 @@ fn root_help_lists_target_and_upload_commands() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("target  Manage upload targets"))
-        .stdout(predicate::str::contains(
-            "upload  Upload a file or directory",
-        ));
+        .stdout(predicate::str::contains("target"))
+        .stdout(predicate::str::contains("Manage upload targets"))
+        .stdout(predicate::str::contains("upload"))
+        .stdout(predicate::str::contains("Upload a file or directory"))
+        .stdout(predicate::str::contains("language"))
+        .stdout(predicate::str::contains("Manage CLI language"));
+}
+
+#[test]
+fn root_help_uses_saved_chinese_language() {
+    let config_dir = tempfile::tempdir().unwrap();
+
+    let mut language_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut language_command, config_dir.path());
+    language_command
+        .args(["language", "use", "zh"])
+        .assert()
+        .success();
+
+    let mut help_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut help_command, config_dir.path());
+    help_command
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("管理上传 target"))
+        .stdout(predicate::str::contains("上传文件或目录"))
+        .stdout(predicate::str::contains("管理 CLI 语言"));
 }
 
 #[test]
@@ -68,6 +92,35 @@ fn log_help_lists_export_and_clear_commands() {
         .stdout(predicate::str::contains(
             "clear   Clear encrypted diagnostic logs",
         ));
+}
+
+#[test]
+fn language_use_switches_prompts_to_chinese() {
+    let config_dir = tempfile::tempdir().unwrap();
+
+    let mut language_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut language_command, config_dir.path());
+    language_command
+        .args(["language", "use", "zh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("zh"));
+
+    let mut add_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut add_command, config_dir.path());
+    add_command
+        .args(["target", "add", "r2-blog", "--skip-check"])
+        .write_stdin(
+            "eave-assets\n\
+             https://example.r2.cloudflarestorage.com\n\
+             auto\n\
+             https://assets.example.com\n\
+             n\n",
+        )
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("存储桶:"))
+        .stdout(predicate::str::contains("公开访问基础 URL:"));
 }
 
 #[test]
@@ -162,6 +215,63 @@ fn target_add_accepts_all_metadata_as_options() {
     assert!(content.contains("endpoint = \"https://example.r2.cloudflarestorage.com\""));
     assert!(content.contains("region = \"auto\""));
     assert!(content.contains("public_base_url = \"https://assets.example.com\""));
+}
+
+#[test]
+fn target_add_normalizes_public_base_url_without_scheme() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--bucket",
+            "eave-assets",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--public-base-url",
+            "img.eaveluo.com",
+            "--skip-check",
+        ])
+        .assert()
+        .success();
+
+    let target_store = config_dir.path().join(".filelift").join("targets.toml");
+    let content = std::fs::read_to_string(target_store).unwrap();
+    assert!(content.contains("public_base_url = \"https://img.eaveluo.com\""));
+}
+
+#[test]
+fn target_add_does_not_save_when_connectivity_check_fails() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--bucket",
+            "eave-assets",
+            "--endpoint",
+            "http://127.0.0.1:1",
+            "--public-base-url",
+            "https://assets.example.com",
+            "--access-key-id",
+            "test",
+            "--secret-access-key",
+            "test",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target connectivity check failed"));
+
+    let target_store = config_dir.path().join(".filelift").join("targets.toml");
+    assert!(!target_store.exists());
 }
 
 #[test]

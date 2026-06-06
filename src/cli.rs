@@ -18,6 +18,9 @@ pub enum Commands {
     #[command(about = "Manage diagnostic logs")]
     #[command(subcommand)]
     Log(LogCommands),
+    #[command(about = "Manage CLI language")]
+    #[command(subcommand)]
+    Language(LanguageCommands),
 }
 
 #[derive(Debug, Subcommand)]
@@ -38,6 +41,14 @@ pub enum LogCommands {
     Export(LogExportCommand),
     #[command(about = "Clear encrypted diagnostic logs")]
     Clear,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LanguageCommands {
+    #[command(about = "Show the current CLI language")]
+    Show,
+    #[command(about = "Set the CLI language")]
+    Use(LanguageUseCommand),
 }
 
 #[derive(Debug, Args)]
@@ -65,6 +76,13 @@ pub struct TargetAddCommand {
     pub secret_access_key: Option<String>,
     #[arg(long)]
     pub set_default: bool,
+    #[arg(long)]
+    pub skip_check: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LanguageUseCommand {
+    pub language: String,
 }
 
 #[derive(Debug, Args)]

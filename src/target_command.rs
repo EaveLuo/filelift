@@ -4,48 +4,50 @@ use anyhow::{Context, Result};
 
 use crate::{
     cli::{TargetAddCommand, TargetCommands, TargetRemoveCommand, TargetUseCommand},
-    diagnostic_log, secret,
+    diagnostic_log, i18n, output, secret, storage,
     target::{TargetStore, UploadTarget},
 };
 
-pub fn run(command: TargetCommands) -> Result<()> {
+pub async fn run(command: TargetCommands) -> Result<()> {
     match command {
-        TargetCommands::Add(command) => add(command),
+        TargetCommands::Add(command) => add(command).await,
         TargetCommands::List => list(),
         TargetCommands::Use(command) => use_target(command),
         TargetCommands::Remove(command) => remove(command),
     }
 }
 
-fn add(command: TargetAddCommand) -> Result<()> {
+async fn add(command: TargetAddCommand) -> Result<()> {
     let mut store = TargetStore::load()?;
     let name = command.name;
     let should_prompt_region =
         command.bucket.is_none() || command.endpoint.is_none() || command.public_base_url.is_none();
-    let bucket = prompt_required(command.bucket, "Bucket")?;
-    let endpoint = prompt_required(command.endpoint, "Endpoint")?;
+    let bucket = prompt_required(command.bucket, &i18n::t("prompt-bucket"))?;
+    let endpoint = prompt_required(command.endpoint, &i18n::t("prompt-endpoint"))?;
     let region = if should_prompt_region {
-        prompt_with_default(command.region, "Region", "auto")?
+        prompt_with_default(command.region, &i18n::t("prompt-region"), "auto")?
     } else {
         command.region.unwrap_or_else(|| "auto".to_string())
     };
-    let public_base_url = prompt_required(command.public_base_url, "Public base URL")?;
+    let public_base_url =
+        prompt_required(command.public_base_url, &i18n::t("prompt-public-base-url"))?;
+    let public_base_url = output::normalize_public_base_url(&public_base_url)?;
     let credentials = prompt_credentials(
         command.access_key_id,
         command.secret_access_key,
         should_prompt_region,
     )?;
+    let target = UploadTarget {
+        provider: command.provider,
+        bucket,
+        endpoint,
+        region,
+        public_base_url,
+    };
 
-    store.targets.insert(
-        name.clone(),
-        UploadTarget {
-            provider: command.provider,
-            bucket,
-            endpoint,
-            region,
-            public_base_url,
-        },
-    );
+    check_target_connectivity(&target, credentials.clone(), command.skip_check).await?;
+
+    store.targets.insert(name.clone(), target);
 
     if let Some((access_key_id, secret_access_key)) = credentials {
         secret::set_credentials(&name, &access_key_id, &secret_access_key)?;
@@ -57,7 +59,35 @@ fn add(command: TargetAddCommand) -> Result<()> {
 
     store.save()?;
     diagnostic_log::record_command_result("target add", Some(&name), "success");
-    println!("Added target `{name}`.");
+    println!("{}", i18n::t_args("target-added", &[("name", &name)]));
+    Ok(())
+}
+
+async fn check_target_connectivity(
+    target: &UploadTarget,
+    credentials: Option<(String, String)>,
+    skip_check: bool,
+) -> Result<()> {
+    if skip_check {
+        return Ok(());
+    }
+
+    let Some((access_key_id, secret_access_key)) = credentials else {
+        println!("{}", i18n::t("target-connectivity-skipped-no-credentials"));
+        return Ok(());
+    };
+
+    println!("{}", i18n::t("target-checking-connectivity"));
+    let client = storage::s3::Client::new(
+        target.clone(),
+        secret::Credentials {
+            access_key_id,
+            secret_access_key,
+        },
+    )
+    .await?;
+    client.check_connectivity().await?;
+    println!("{}", i18n::t("target-connectivity-passed"));
     Ok(())
 }
 
@@ -72,7 +102,10 @@ fn prompt_required(value: Option<String>, label: &str) -> Result<String> {
             return Ok(answer);
         }
 
-        println!("{label} cannot be empty.");
+        println!(
+            "{}",
+            i18n::t_args("prompt-cannot-be-empty", &[("label", label)])
+        );
     }
 }
 
@@ -100,19 +133,17 @@ fn prompt_credentials(
         }
         (Some(access_key_id), None) => Ok(Some((
             access_key_id,
-            rpassword::prompt_password("Secret access key: ")
-                .context("failed to read secret access key")?,
+            prompt_password(&i18n::t("prompt-secret-access-key"))?,
         ))),
         (None, Some(secret_access_key)) => Ok(Some((
-            prompt_required(None, "Access key ID")?,
+            prompt_required(None, &i18n::t("prompt-access-key-id"))?,
             secret_access_key,
         ))),
         (None, None) if should_prompt_empty_credentials => {
-            if prompt_yes_no("Save access keys now? [y/N]: ")? {
+            if prompt_yes_no(&i18n::t("prompt-save-access-keys-now"))? {
                 Ok(Some((
-                    prompt_required(None, "Access key ID")?,
-                    rpassword::prompt_password("Secret access key: ")
-                        .context("failed to read secret access key")?,
+                    prompt_required(None, &i18n::t("prompt-access-key-id"))?,
+                    prompt_password(&i18n::t("prompt-secret-access-key"))?,
                 )))
             } else {
                 Ok(None)
@@ -128,9 +159,17 @@ fn prompt_yes_no(label: &str) -> Result<bool> {
         match answer.to_ascii_lowercase().as_str() {
             "" | "n" | "no" => return Ok(false),
             "y" | "yes" => return Ok(true),
-            _ => println!("Please answer y or n."),
+            _ => println!("{}", i18n::t("prompt-please-answer-yes-no")),
         }
     }
+}
+
+fn prompt_password(label: &str) -> Result<String> {
+    let config = rpassword::ConfigBuilder::new()
+        .password_feedback_mask('*')
+        .build();
+    rpassword::prompt_password_with_config(format!("{label}: "), config)
+        .with_context(|| format!("failed to read {label}"))
 }
 
 fn prompt_line(label: &str) -> Result<String> {
@@ -155,7 +194,7 @@ fn list() -> Result<()> {
     let store = TargetStore::load()?;
     if store.targets.is_empty() {
         diagnostic_log::record_command_result("target list", None, "success");
-        println!("No targets configured.");
+        println!("{}", i18n::t("target-no-targets-configured"));
         return Ok(());
     }
 
@@ -183,7 +222,10 @@ fn use_target(command: TargetUseCommand) -> Result<()> {
     store.default_target = Some(command.name.clone());
     store.save()?;
     diagnostic_log::record_command_result("target use", Some(&command.name), "success");
-    println!("Using target `{}`.", command.name);
+    println!(
+        "{}",
+        i18n::t_args("target-using", &[("name", &command.name)])
+    );
     Ok(())
 }
 
@@ -201,6 +243,9 @@ fn remove(command: TargetRemoveCommand) -> Result<()> {
     secret::delete_credentials(&command.name)?;
     store.save()?;
     diagnostic_log::record_command_result("target remove", Some(&command.name), "success");
-    println!("Removed target `{}`.", command.name);
+    println!(
+        "{}",
+        i18n::t_args("target-removed", &[("name", &command.name)])
+    );
     Ok(())
 }
