@@ -28,24 +28,56 @@ async fn add(command: TargetAddCommand) -> Result<()> {
         !store.targets.contains_key(&name),
         "target `{name}` already exists; use `filelift target update {name}` to change it"
     );
-    let should_prompt_region =
-        command.bucket.is_none() || command.endpoint.is_none() || command.public_base_url.is_none();
-    let bucket = prompt_required(command.bucket, &i18n::t("prompt-bucket"))?;
-    let endpoint = prompt_required(command.endpoint, &i18n::t("prompt-endpoint"))?;
+    let draft = store.draft_targets.get(&name).cloned();
+    if draft.is_some() {
+        println!(
+            "{}",
+            i18n::t_args("target-draft-resuming", &[("name", &name)])
+        );
+    }
+    let should_prompt_region = draft.is_some()
+        || command.bucket.is_none()
+        || command.endpoint.is_none()
+        || command.public_base_url.is_none();
+    let bucket = resolve_add_field(
+        command.bucket,
+        &i18n::t("prompt-bucket"),
+        draft.as_ref().map(|target| target.bucket.as_str()),
+    )?;
+    let endpoint = resolve_add_field(
+        command.endpoint,
+        &i18n::t("prompt-endpoint"),
+        draft.as_ref().map(|target| target.endpoint.as_str()),
+    )?;
     let region = if should_prompt_region {
-        prompt_with_default(command.region, &i18n::t("prompt-region"), "auto")?
+        prompt_with_default(
+            command.region,
+            &i18n::t("prompt-region"),
+            draft
+                .as_ref()
+                .map(|target| target.region.as_str())
+                .unwrap_or("auto"),
+        )?
     } else {
-        command.region.unwrap_or_else(|| "auto".to_string())
+        command
+            .region
+            .or_else(|| draft.as_ref().map(|target| target.region.clone()))
+            .unwrap_or_else(|| "auto".to_string())
     };
-    let public_base_url =
-        prompt_required(command.public_base_url, &i18n::t("prompt-public-base-url"))?;
+    let public_base_url = resolve_add_field(
+        command.public_base_url,
+        &i18n::t("prompt-public-base-url"),
+        draft.as_ref().map(|target| target.public_base_url.as_str()),
+    )?;
     let public_base_url = output::normalize_public_base_url(&public_base_url)?;
+    let saved_draft_credentials = draft.as_ref().and_then(|_| secret::credentials(&name).ok());
     let credentials = prompt_credentials(
         command.access_key_id,
         command.secret_access_key,
-        CredentialPromptMode::Require,
+        CredentialPromptMode::RequireOrReuseSaved {
+            saved_credentials: saved_draft_credentials,
+        },
     )?;
-    let connectivity_credentials = credentials.clone().map(credentials_from_pair);
     let target = UploadTarget {
         provider: command.provider,
         bucket,
@@ -53,10 +85,19 @@ async fn add(command: TargetAddCommand) -> Result<()> {
         region,
         public_base_url,
     };
+    let connectivity_credentials =
+        resolve_connectivity_credentials(credentials.clone(), || secret::credentials(&name))?;
 
-    check_target_connectivity(&target, connectivity_credentials, command.skip_check).await?;
+    if let Err(error) =
+        check_target_connectivity(&target, connectivity_credentials, command.skip_check).await
+    {
+        save_draft_target(&mut store, &name, target, credentials)?;
+        println!("{}", i18n::t_args("target-draft-saved", &[("name", &name)]));
+        return Err(error);
+    }
 
     store.targets.insert(name.clone(), target);
+    store.draft_targets.remove(&name);
 
     if let Some((access_key_id, secret_access_key)) = credentials {
         secret::set_credentials(&name, &access_key_id, &secret_access_key)?;
@@ -72,14 +113,45 @@ async fn add(command: TargetAddCommand) -> Result<()> {
     Ok(())
 }
 
+fn resolve_add_field(value: Option<String>, label: &str, draft: Option<&str>) -> Result<String> {
+    match (value, draft) {
+        (Some(value), _) => Ok(value),
+        (None, Some(draft)) => prompt_existing_default(label, draft),
+        (None, None) => prompt_required(None, label),
+    }
+}
+
+fn save_draft_target(
+    store: &mut TargetStore,
+    name: &str,
+    target: UploadTarget,
+    credentials: Option<(String, String)>,
+) -> Result<()> {
+    store.draft_targets.insert(name.to_string(), target);
+    store.save()?;
+    if let Some((access_key_id, secret_access_key)) = credentials {
+        let _ = secret::set_credentials(name, &access_key_id, &secret_access_key);
+    }
+    Ok(())
+}
+
 async fn update(command: TargetUpdateCommand) -> Result<()> {
     let mut store = TargetStore::load()?;
     let should_prompt_metadata = should_prompt_update_metadata(&command);
     let name = command.name;
+    let is_draft_resume =
+        !store.targets.contains_key(&name) && store.draft_targets.contains_key(&name);
     let existing = store
         .targets
         .get(&name)
+        .or_else(|| store.draft_targets.get(&name))
         .with_context(|| format!("target `{name}` does not exist"))?;
+    if is_draft_resume {
+        println!(
+            "{}",
+            i18n::t_args("target-draft-resuming", &[("name", &name)])
+        );
+    }
 
     let provider = resolve_update_field(
         command.provider,
@@ -132,18 +204,24 @@ async fn update(command: TargetUpdateCommand) -> Result<()> {
     check_target_connectivity(&target, connectivity_credentials, command.skip_check).await?;
 
     store.targets.insert(name.clone(), target);
+    store.draft_targets.remove(&name);
 
     if let Some((access_key_id, secret_access_key)) = credentials {
         secret::set_credentials(&name, &access_key_id, &secret_access_key)?;
     }
 
-    if command.set_default {
+    if command.set_default || (is_draft_resume && store.default_target.is_none()) {
         store.default_target = Some(name.clone());
     }
 
     store.save()?;
     diagnostic_log::record_command_result("target update", Some(&name), "success");
-    println!("{}", i18n::t_args("target-updated", &[("name", &name)]));
+    let message = if is_draft_resume {
+        i18n::t_args("target-added", &[("name", &name)])
+    } else {
+        i18n::t_args("target-updated", &[("name", &name)])
+    };
+    println!("{message}");
     Ok(())
 }
 
@@ -263,6 +341,27 @@ fn prompt_credentials(
     secret_access_key: Option<String>,
     mode: CredentialPromptMode,
 ) -> Result<Option<(String, String)>> {
+    if let CredentialPromptMode::RequireOrReuseSaved {
+        saved_credentials: Some(saved_credentials),
+    } = mode
+    {
+        let access_key_id = match access_key_id {
+            Some(access_key_id) => access_key_id,
+            None => prompt_existing_default(
+                &i18n::t("prompt-access-key-id"),
+                &saved_credentials.access_key_id,
+            )?,
+        };
+        let secret_access_key = match secret_access_key {
+            Some(secret_access_key) => secret_access_key,
+            None => prompt_password_with_default(
+                &i18n::t("prompt-secret-access-key"),
+                &saved_credentials.secret_access_key,
+            )?,
+        };
+        return Ok(Some((access_key_id, secret_access_key)));
+    }
+
     match (access_key_id, secret_access_key) {
         (Some(access_key_id), Some(secret_access_key)) => {
             Ok(Some((access_key_id, secret_access_key)))
@@ -283,16 +382,20 @@ fn prompt_credentials(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum CredentialPromptMode {
-    Require,
-    PromptWhenMissingSaved { has_saved_credentials: bool },
+    RequireOrReuseSaved {
+        saved_credentials: Option<secret::Credentials>,
+    },
+    PromptWhenMissingSaved {
+        has_saved_credentials: bool,
+    },
 }
 
 impl CredentialPromptMode {
-    fn should_prompt_for_missing_credentials(self) -> bool {
+    fn should_prompt_for_missing_credentials(&self) -> bool {
         match self {
-            Self::Require => true,
+            Self::RequireOrReuseSaved { .. } => true,
             Self::PromptWhenMissingSaved {
                 has_saved_credentials,
             } => !has_saved_credentials,
@@ -306,6 +409,19 @@ fn prompt_password(label: &str) -> Result<String> {
         .build();
     rpassword::prompt_password_with_config(format!("{label}: "), config)
         .with_context(|| format!("failed to read {label}"))
+}
+
+fn prompt_password_with_default(label: &str, current: &str) -> Result<String> {
+    let config = rpassword::ConfigBuilder::new()
+        .password_feedback_mask('*')
+        .build();
+    let answer = rpassword::prompt_password_with_config(format!("{label} [saved]: "), config)
+        .with_context(|| format!("failed to read {label}"))?;
+    if answer.is_empty() {
+        Ok(current.to_string())
+    } else {
+        Ok(answer)
+    }
 }
 
 fn prompt_line(label: &str) -> Result<String> {

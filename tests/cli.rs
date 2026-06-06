@@ -5,6 +5,25 @@ fn with_home_dir(command: &mut Command, home_dir: &std::path::Path) {
     command.env("FILELIFT_HOME", home_dir);
 }
 
+fn write_draft_target(home_dir: &std::path::Path, name: &str) {
+    let filelift_dir = home_dir.join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        format!(
+            r#"
+[draft_targets."{name}"]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+"#
+        ),
+    )
+    .unwrap();
+}
+
 #[test]
 fn root_help_lists_target_and_upload_commands() {
     let mut command = Command::cargo_bin("filelift").unwrap();
@@ -506,7 +525,43 @@ fn target_update_refuses_missing_target() {
 }
 
 #[test]
-fn target_add_does_not_save_when_connectivity_check_fails() {
+fn target_update_can_resume_failed_connectivity_draft() {
+    let config_dir = tempfile::tempdir().unwrap();
+    write_draft_target(config_dir.path(), "r2-blog");
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "target",
+            "update",
+            "r2-blog",
+            "--region",
+            "APAC",
+            "--public-base-url",
+            "img.eaveluo.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resuming draft target `r2-blog`."))
+        .stdout(predicate::str::contains("Added target `r2-blog`."));
+
+    let content =
+        std::fs::read_to_string(config_dir.path().join(".filelift").join("targets.toml")).unwrap();
+    assert!(content.contains("[targets.r2-blog]"));
+    assert!(!content.contains("[draft_targets."));
+    assert!(content.contains("region = \"APAC\""));
+    assert!(content.contains("public_base_url = \"https://img.eaveluo.com\""));
+}
+
+#[test]
+fn target_add_does_not_save_formal_target_when_connectivity_check_fails() {
     let config_dir = tempfile::tempdir().unwrap();
     let mut command = Command::cargo_bin("filelift").unwrap();
     with_home_dir(&mut command, config_dir.path());
@@ -532,7 +587,87 @@ fn target_add_does_not_save_when_connectivity_check_fails() {
         .stderr(predicate::str::contains("target connectivity check failed"));
 
     let target_store = config_dir.path().join(".filelift").join("targets.toml");
-    assert!(!target_store.exists());
+    let content = std::fs::read_to_string(target_store).unwrap();
+    assert!(!content.contains("[targets.r2-blog]"));
+}
+
+#[test]
+fn target_add_saves_failed_connectivity_input_as_draft() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--bucket",
+            "eave-assets",
+            "--endpoint",
+            "http://127.0.0.1:1",
+            "--region",
+            "auto",
+            "--public-base-url",
+            "https://assets.example.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target connectivity check failed"));
+
+    let target_store = config_dir.path().join(".filelift").join("targets.toml");
+    let content = std::fs::read_to_string(target_store).unwrap();
+    assert!(!content.contains("[targets.r2-blog]"));
+    assert!(content.contains("[draft_targets.r2-blog]"));
+    assert!(content.contains("bucket = \"eave-assets\""));
+    assert!(content.contains("endpoint = \"http://127.0.0.1:1\""));
+    assert!(content.contains("region = \"auto\""));
+    assert!(content.contains("public_base_url = \"https://assets.example.com\""));
+}
+
+#[test]
+fn target_add_resumes_failed_connectivity_draft_defaults() {
+    let config_dir = tempfile::tempdir().unwrap();
+    write_draft_target(config_dir.path(), "r2-blog");
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
+        ])
+        .write_stdin("\n\nAPAC\nhttps://img.eaveluo.com\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resuming draft target `r2-blog`."))
+        .stdout(predicate::str::contains("Bucket [eave-assets]:"))
+        .stdout(predicate::str::contains(
+            "Endpoint [https://example.r2.cloudflarestorage.com]:",
+        ))
+        .stdout(predicate::str::contains("Region [auto]:"))
+        .stdout(predicate::str::contains(
+            "Public base URL [https://assets.example.com]:",
+        ))
+        .stdout(predicate::str::contains("Added target `r2-blog`."));
+
+    let content =
+        std::fs::read_to_string(config_dir.path().join(".filelift").join("targets.toml")).unwrap();
+    assert!(content.contains("[targets.r2-blog]"));
+    assert!(!content.contains("[draft_targets.r2-blog]"));
+    assert!(content.contains("region = \"APAC\""));
+    assert!(content.contains("public_base_url = \"https://img.eaveluo.com\""));
 }
 
 #[test]

@@ -9,6 +9,8 @@ pub struct TargetStore {
     pub default_target: Option<String>,
     #[serde(default)]
     pub targets: BTreeMap<String, UploadTarget>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub draft_targets: BTreeMap<String, UploadTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +83,7 @@ mod tests {
         let store = TargetStore {
             default_target: Some("r2-blog".to_string()),
             targets: BTreeMap::new(),
+            draft_targets: BTreeMap::new(),
         };
 
         assert_eq!(
@@ -94,6 +97,7 @@ mod tests {
         let store = TargetStore {
             default_target: Some("r2-blog".to_string()),
             targets: BTreeMap::new(),
+            draft_targets: BTreeMap::new(),
         };
 
         assert_eq!(store.active_target_name(None).unwrap(), "r2-blog");

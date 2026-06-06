@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use keyring_core::{Entry, Error};
+use keyring_core::{Entry, Error, set_default_store};
 
 const SERVICE: &str = "filelift";
 const DIAGNOSTIC_LOG_KEY_ACCOUNT: &str = "diagnostic_log_key";
@@ -73,7 +73,31 @@ fn delete_secret(account: &str) -> Result<()> {
 }
 
 fn ensure_native_store() -> Result<()> {
-    keyring::use_native_store(false).context("failed to initialize native keyring store")
+    set_native_store().context("failed to initialize native keyring store")
+}
+
+#[cfg(target_os = "linux")]
+fn set_native_store() -> keyring_core::Result<()> {
+    set_default_store(linux_keyutils_keyring_store::Store::new()?);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn set_native_store() -> keyring_core::Result<()> {
+    set_default_store(apple_native_keyring_store::keychain::Store::new()?);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn set_native_store() -> keyring_core::Result<()> {
+    set_default_store(windows_native_keyring_store::Store::new()?);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn set_native_store() -> keyring_core::Result<()> {
+    set_default_store(keyring_core::sample::Store::new()?);
+    Ok(())
 }
 
 fn secret_account(target_name: &str, key: &str) -> String {
