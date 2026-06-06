@@ -138,9 +138,16 @@ fn prompt_line(label: &str) -> Result<String> {
     io::stdout().flush().context("failed to flush prompt")?;
 
     let mut answer = String::new();
-    io::stdin()
+    let bytes_read = io::stdin()
         .read_line(&mut answer)
         .context("failed to read prompt input")?;
+    if bytes_read == 0 {
+        anyhow::bail!(
+            "prompt input ended before `{}` was provided",
+            label.trim_end_matches(": ").trim()
+        );
+    }
+
     Ok(answer.trim().to_string())
 }
 

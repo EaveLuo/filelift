@@ -121,6 +121,20 @@ fn target_add_prompts_for_missing_metadata() {
 }
 
 #[test]
+fn target_add_fails_on_eof_when_required_prompt_is_missing() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args(["target", "add", "r2-blog"])
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("prompt input ended before"));
+}
+
+#[test]
 fn target_add_accepts_all_metadata_as_options() {
     let config_dir = tempfile::tempdir().unwrap();
     let mut command = Command::cargo_bin("filelift").unwrap();
