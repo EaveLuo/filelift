@@ -12,9 +12,10 @@ use crate::target::filelift_home_dir;
 #[folder = "i18n"]
 struct Localizations;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
+    #[default]
     En,
     Zh,
 }
@@ -40,12 +41,6 @@ impl Language {
             Self::En => "en".parse().expect("valid fallback language id"),
             Self::Zh => "zh-CN".parse().expect("valid Chinese language id"),
         }
-    }
-}
-
-impl Default for Language {
-    fn default() -> Self {
-        Self::En
     }
 }
 
