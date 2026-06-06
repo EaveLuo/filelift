@@ -25,8 +25,10 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum TargetCommands {
-    #[command(about = "Add or update an upload target")]
+    #[command(about = "Add an upload target")]
     Add(TargetAddCommand),
+    #[command(about = "Update an upload target")]
+    Update(TargetUpdateCommand),
     #[command(about = "List configured upload targets")]
     List,
     #[command(about = "Set the default upload target")]
@@ -83,6 +85,29 @@ pub struct TargetAddCommand {
 #[derive(Debug, Args)]
 pub struct LanguageUseCommand {
     pub language: String,
+}
+
+#[derive(Debug, Args)]
+pub struct TargetUpdateCommand {
+    pub name: String,
+    #[arg(long)]
+    pub provider: Option<String>,
+    #[arg(long)]
+    pub bucket: Option<String>,
+    #[arg(long)]
+    pub endpoint: Option<String>,
+    #[arg(long)]
+    pub region: Option<String>,
+    #[arg(long)]
+    pub public_base_url: Option<String>,
+    #[arg(long)]
+    pub access_key_id: Option<String>,
+    #[arg(long)]
+    pub secret_access_key: Option<String>,
+    #[arg(long)]
+    pub set_default: bool,
+    #[arg(long)]
+    pub skip_check: bool,
 }
 
 #[derive(Debug, Args)]

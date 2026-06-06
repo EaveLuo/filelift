@@ -51,9 +51,8 @@ fn target_help_lists_target_management_commands() {
         .args(["target", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "add     Add or update an upload target",
-        ))
+        .stdout(predicate::str::contains("add     Add an upload target"))
+        .stdout(predicate::str::contains("update  Update an upload target"))
         .stdout(predicate::str::contains(
             "list    List configured upload targets",
         ))
@@ -109,13 +108,21 @@ fn language_use_switches_prompts_to_chinese() {
     let mut add_command = Command::cargo_bin("filelift").unwrap();
     with_home_dir(&mut add_command, config_dir.path());
     add_command
-        .args(["target", "add", "r2-blog", "--skip-check"])
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
+        ])
         .write_stdin(
             "eave-assets\n\
              https://example.r2.cloudflarestorage.com\n\
              auto\n\
-             https://assets.example.com\n\
-             n\n",
+             https://assets.example.com\n",
         )
         .assert()
         .success()
@@ -142,6 +149,42 @@ fn dry_run_upload_without_target_returns_actionable_error() {
 }
 
 #[test]
+fn upload_without_credentials_points_to_target_update() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let file_path = tempdir.path().join("cover.webp");
+    std::fs::write(&file_path, "image").unwrap();
+
+    let filelift_dir = config_dir.path().join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        r#"
+default_target = "missing-creds-target"
+
+[targets.missing-creds-target]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+"#,
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args(["upload", file_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "filelift target update missing-creds-target",
+        ));
+}
+
+#[test]
 fn target_add_prompts_for_missing_metadata() {
     let config_dir = tempfile::tempdir().unwrap();
     let mut command = Command::cargo_bin("filelift").unwrap();
@@ -149,12 +192,18 @@ fn target_add_prompts_for_missing_metadata() {
 
     command
         .args(["target", "add", "r2-blog"])
+        .args([
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
+        ])
         .write_stdin(
             "eave-assets\n\
              https://example.r2.cloudflarestorage.com\n\
              auto\n\
-             https://assets.example.com\n\
-             n\n",
+             https://assets.example.com\n",
         )
         .assert()
         .success()
@@ -204,6 +253,11 @@ fn target_add_accepts_all_metadata_as_options() {
             "https://example.r2.cloudflarestorage.com",
             "--public-base-url",
             "https://assets.example.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
         ])
         .assert()
         .success()
@@ -234,6 +288,10 @@ fn target_add_normalizes_public_base_url_without_scheme() {
             "https://example.r2.cloudflarestorage.com",
             "--public-base-url",
             "img.eaveluo.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
             "--skip-check",
         ])
         .assert()
@@ -242,6 +300,209 @@ fn target_add_normalizes_public_base_url_without_scheme() {
     let target_store = config_dir.path().join(".filelift").join("targets.toml");
     let content = std::fs::read_to_string(target_store).unwrap();
     assert!(content.contains("public_base_url = \"https://img.eaveluo.com\""));
+}
+
+#[test]
+fn target_add_prompts_for_missing_access_key_id() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--bucket",
+            "eave-assets",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--public-base-url",
+            "https://assets.example.com",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
+        ])
+        .write_stdin("test-access-key\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Access key ID:"));
+}
+
+#[test]
+fn target_add_refuses_to_replace_existing_target() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut add_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut add_command, config_dir.path());
+    add_command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--bucket",
+            "eave-assets",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--public-base-url",
+            "https://assets.example.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
+        ])
+        .assert()
+        .success();
+
+    let mut second_add = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut second_add, config_dir.path());
+    second_add
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--bucket",
+            "other-assets",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--public-base-url",
+            "https://assets.example.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+#[test]
+fn target_update_changes_selected_metadata() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut add_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut add_command, config_dir.path());
+    add_command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--bucket",
+            "eave-assets",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--public-base-url",
+            "https://assets.example.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
+        ])
+        .assert()
+        .success();
+
+    let mut update_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut update_command, config_dir.path());
+    update_command
+        .args([
+            "target",
+            "update",
+            "r2-blog",
+            "--bucket",
+            "updated-assets",
+            "--public-base-url",
+            "img.eaveluo.com",
+            "--skip-check",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated target `r2-blog`."));
+
+    let target_store = config_dir.path().join(".filelift").join("targets.toml");
+    let content = std::fs::read_to_string(target_store).unwrap();
+    assert!(content.contains("bucket = \"updated-assets\""));
+    assert!(content.contains("endpoint = \"https://example.r2.cloudflarestorage.com\""));
+    assert!(content.contains("public_base_url = \"https://img.eaveluo.com\""));
+}
+
+#[test]
+fn target_update_prompts_for_metadata_when_no_fields_are_given() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut add_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut add_command, config_dir.path());
+    add_command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--bucket",
+            "eave-assets",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--public-base-url",
+            "https://assets.example.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
+        ])
+        .assert()
+        .success();
+
+    let mut update_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut update_command, config_dir.path());
+    update_command
+        .args(["target", "update", "r2-blog", "--skip-check"])
+        .write_stdin(
+            "\n\
+             updated-assets\n\
+             \n\
+             \n\
+             img.eaveluo.com\n",
+        )
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Provider [s3]:"))
+        .stdout(predicate::str::contains("Bucket [eave-assets]:"))
+        .stdout(predicate::str::contains(
+            "Endpoint [https://example.r2.cloudflarestorage.com]:",
+        ))
+        .stdout(predicate::str::contains("Region [auto]:"))
+        .stdout(predicate::str::contains(
+            "Public base URL [https://assets.example.com]:",
+        ))
+        .stdout(predicate::str::contains("Updated target `r2-blog`."));
+
+    let target_store = config_dir.path().join(".filelift").join("targets.toml");
+    let content = std::fs::read_to_string(target_store).unwrap();
+    assert!(content.contains("provider = \"s3\""));
+    assert!(content.contains("bucket = \"updated-assets\""));
+    assert!(content.contains("endpoint = \"https://example.r2.cloudflarestorage.com\""));
+    assert!(content.contains("region = \"auto\""));
+    assert!(content.contains("public_base_url = \"https://img.eaveluo.com\""));
+}
+
+#[test]
+fn target_update_refuses_missing_target() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "target",
+            "update",
+            "missing",
+            "--bucket",
+            "updated-assets",
+            "--skip-check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not exist"));
 }
 
 #[test]
@@ -296,6 +557,11 @@ fn target_add_writes_encrypted_log_that_can_be_exported() {
             "https://example.r2.cloudflarestorage.com",
             "--public-base-url",
             "https://assets.example.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
         ])
         .assert()
         .success();
@@ -349,6 +615,11 @@ fn log_clear_removes_encrypted_log_file() {
             "https://example.r2.cloudflarestorage.com",
             "--public-base-url",
             "https://assets.example.com",
+            "--access-key-id",
+            "test-access-key",
+            "--secret-access-key",
+            "test-secret-key",
+            "--skip-check",
         ])
         .assert()
         .success();

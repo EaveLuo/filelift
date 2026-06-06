@@ -3,7 +3,8 @@ cmd-target-about = Manage upload targets
 cmd-upload-about = Upload a file or directory
 cmd-log-about = Manage diagnostic logs
 cmd-language-about = Manage CLI language
-cmd-target-add-about = Add or update an upload target
+cmd-target-add-about = Add an upload target
+cmd-target-update-about = Update an upload target
 cmd-target-list-about = List configured upload targets
 cmd-target-use-about = Set the default upload target
 cmd-target-remove-about = Remove an upload target
@@ -13,6 +14,7 @@ cmd-language-show-about = Show the current CLI language
 cmd-language-use-about = Set the CLI language
 
 prompt-bucket = Bucket
+prompt-provider = Provider
 prompt-endpoint = Endpoint
 prompt-region = Region
 prompt-public-base-url = Public base URL
@@ -23,6 +25,7 @@ prompt-please-answer-yes-no = Please answer y or n.
 prompt-cannot-be-empty = { $label } cannot be empty.
 
 target-added = Added target `{ $name }`.
+target-updated = Updated target `{ $name }`.
 target-using = Using target `{ $name }`.
 target-removed = Removed target `{ $name }`.
 target-no-targets-configured = No targets configured.
@@ -35,4 +38,4 @@ language-current = Current language: { $language }
 log-exported = Exported diagnostic log to { $path } ({ $count } events). Review it before sharing.
 log-cleared = Cleared diagnostic logs.
 
-upload-missing-credentials = Missing credentials for target `{ $target }`; run `filelift target add { $target }` and choose to save access keys.
+upload-missing-credentials = Missing credentials for target `{ $target }`; run `filelift target update { $target }` to save access keys.
