@@ -10,27 +10,27 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    #[command(about = "Manage storage profiles")]
+    #[command(about = "Manage storage configs")]
     #[command(subcommand)]
-    Profile(ProfileCommands),
+    Config(ConfigCommands),
     #[command(about = "Upload a file or directory")]
     Upload(UploadCommand),
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ProfileCommands {
-    #[command(about = "Add or update a storage profile")]
-    Add(ProfileAddCommand),
-    #[command(about = "List configured storage profiles")]
+pub enum ConfigCommands {
+    #[command(about = "Add or update a storage config")]
+    Add(ConfigAddCommand),
+    #[command(about = "List configured storage configs")]
     List,
-    #[command(about = "Set the default storage profile")]
-    Use(ProfileUseCommand),
-    #[command(about = "Remove a storage profile")]
-    Remove(ProfileRemoveCommand),
+    #[command(about = "Set the default storage config")]
+    Use(ConfigUseCommand),
+    #[command(about = "Remove a storage config")]
+    Remove(ConfigRemoveCommand),
 }
 
 #[derive(Debug, Args)]
-pub struct ProfileAddCommand {
+pub struct ConfigAddCommand {
     pub name: String,
     #[arg(long, default_value = "s3")]
     pub provider: String,
@@ -51,12 +51,12 @@ pub struct ProfileAddCommand {
 }
 
 #[derive(Debug, Args)]
-pub struct ProfileUseCommand {
+pub struct ConfigUseCommand {
     pub name: String,
 }
 
 #[derive(Debug, Args)]
-pub struct ProfileRemoveCommand {
+pub struct ConfigRemoveCommand {
     pub name: String,
 }
 
@@ -64,7 +64,7 @@ pub struct ProfileRemoveCommand {
 pub struct UploadCommand {
     pub path: Utf8PathBuf,
     #[arg(long)]
-    pub profile: Option<String>,
+    pub config: Option<String>,
     #[arg(long)]
     pub prefix: Option<String>,
     #[arg(long)]

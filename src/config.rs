@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
-    pub default_profile: Option<String>,
+    pub default_config: Option<String>,
     #[serde(default)]
-    pub profiles: BTreeMap<String, StorageProfile>,
+    pub configs: BTreeMap<String, StorageConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageProfile {
+pub struct StorageConfig {
     pub provider: String,
     pub bucket: String,
     pub endpoint: String,
@@ -43,14 +43,14 @@ impl Config {
         fs::write(&path, content).with_context(|| format!("failed to write config at {path}"))
     }
 
-    pub fn active_profile_name(&self, override_name: Option<&str>) -> Result<String> {
+    pub fn active_config_name(&self, override_name: Option<&str>) -> Result<String> {
         if let Some(name) = override_name {
             return Ok(name.to_string());
         }
 
-        self.default_profile
+        self.default_config
             .clone()
-            .context("no profile selected; run `filelift profile use <name>` or pass --profile")
+            .context("no config selected; run `filelift config use <name>` or pass --config")
     }
 }
 

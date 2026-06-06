@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use url::Url;
 
-use crate::config::StorageProfile;
+use crate::config::StorageConfig;
 
-pub fn public_url(profile: &StorageProfile, key: &str) -> Result<String> {
-    let mut base = Url::parse(&profile.public_base_url)
-        .with_context(|| format!("invalid public_base_url `{}`", profile.public_base_url))?;
+pub fn public_url(config: &StorageConfig, key: &str) -> Result<String> {
+    let mut base = Url::parse(&config.public_base_url)
+        .with_context(|| format!("invalid public_base_url `{}`", config.public_base_url))?;
     let path = format!(
         "{}/{}",
         base.path().trim_end_matches('/'),
@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn joins_public_url_without_double_slashes() {
-        let profile = StorageProfile {
+        let config = StorageConfig {
             provider: "s3".to_string(),
             bucket: "bucket".to_string(),
             endpoint: "https://example.com".to_string(),
@@ -34,7 +34,7 @@ mod tests {
         };
 
         assert_eq!(
-            public_url(&profile, "/blog/cover.webp").unwrap(),
+            public_url(&config, "/blog/cover.webp").unwrap(),
             "https://assets.example.com/base/blog/cover.webp"
         );
     }

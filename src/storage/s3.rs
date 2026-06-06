@@ -4,7 +4,7 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::{config::Region, primitives::ByteStream};
 use camino::Utf8Path;
 
-use crate::{config::StorageProfile, secret};
+use crate::{config::StorageConfig, secret};
 
 pub struct Client {
     inner: aws_sdk_s3::Client,
@@ -12,7 +12,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn new(profile: StorageProfile, credentials: secret::Credentials) -> Result<Self> {
+    pub async fn new(config: StorageConfig, credentials: secret::Credentials) -> Result<Self> {
         let sdk_credentials = Credentials::new(
             credentials.access_key_id,
             credentials.secret_access_key,
@@ -21,18 +21,18 @@ impl Client {
             "filelift",
         );
 
-        let config = aws_config::defaults(BehaviorVersion::latest())
+        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
             .credentials_provider(sdk_credentials)
-            .region(Region::new(profile.region))
-            .endpoint_url(profile.endpoint)
+            .region(Region::new(config.region))
+            .endpoint_url(config.endpoint)
             .load()
             .await;
 
-        let inner = aws_sdk_s3::Client::new(&config);
+        let inner = aws_sdk_s3::Client::new(&sdk_config);
 
         Ok(Self {
             inner,
-            bucket: profile.bucket,
+            bucket: config.bucket,
         })
     }
 

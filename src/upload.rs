@@ -7,11 +7,11 @@ use crate::{cli::UploadCommand, config::Config, output, secret, storage};
 
 pub async fn run(command: UploadCommand) -> Result<()> {
     let config = Config::load()?;
-    let profile_name = config.active_profile_name(command.profile.as_deref())?;
-    let profile = config
-        .profiles
-        .get(&profile_name)
-        .with_context(|| format!("profile `{profile_name}` does not exist"))?;
+    let config_name = config.active_config_name(command.config.as_deref())?;
+    let storage_config = config
+        .configs
+        .get(&config_name)
+        .with_context(|| format!("config `{config_name}` does not exist"))?;
 
     let items = plan_uploads(
         &command.path,
@@ -26,17 +26,17 @@ pub async fn run(command: UploadCommand) -> Result<()> {
     let credentials = if command.dry_run {
         None
     } else {
-        Some(secret::credentials(&profile_name)?)
+        Some(secret::credentials(&config_name)?)
     };
 
     let client = if let Some(credentials) = credentials {
-        Some(storage::s3::Client::new(profile.clone(), credentials).await?)
+        Some(storage::s3::Client::new(storage_config.clone(), credentials).await?)
     } else {
         None
     };
 
     for item in items {
-        let url = output::public_url(profile, &item.key)?;
+        let url = output::public_url(storage_config, &item.key)?;
 
         if let Some(client) = &client {
             client.upload_file(&item.local_path, &item.key).await?;

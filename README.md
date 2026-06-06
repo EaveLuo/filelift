@@ -10,32 +10,32 @@ videos, and other assets should live outside the source repository.
 
 - Upload one file or a directory of files.
 - Support Cloudflare R2, AWS S3, MinIO, and other S3-compatible services.
-- Manage multiple storage profiles.
+- Manage multiple storage configs.
 - Store secrets through the operating system keyring instead of plain text.
 - Print public URLs and Markdown snippets after uploads.
 
 ## Planned CLI
 
 ```bash
-filelift profile add r2-blog \
+filelift config add r2-blog \
   --bucket eave-assets \
   --endpoint https://example.r2.cloudflarestorage.com \
   --region auto \
   --public-base-url https://assets.example.com
 
-filelift profile use r2-blog
+filelift config use r2-blog
 filelift upload ./cover.webp --prefix blog/2026/my-post --markdown
 filelift upload ./assets --recursive --prefix blog/2026/my-post
 ```
 
 ## Configuration Model
 
-Profiles contain non-secret storage metadata:
+Storage configs contain non-secret storage metadata:
 
 ```toml
-default_profile = "r2-blog"
+default_config = "r2-blog"
 
-[profiles.r2-blog]
+[configs.r2-blog]
 provider = "s3"
 bucket = "eave-assets"
 endpoint = "https://example.r2.cloudflarestorage.com"
@@ -46,15 +46,15 @@ public_base_url = "https://assets.example.com"
 Access keys are stored separately in the system keyring:
 
 - service: `filelift`
-- account: `<profile-name>:access_key_id`
-- account: `<profile-name>:secret_access_key`
+- account: `<config-name>:access_key_id`
+- account: `<config-name>:secret_access_key`
 
 ## Architecture
 
 - `cli`: command definitions and argument parsing.
-- `config`: profile config load/save.
+- `config`: storage config load/save.
 - `secret`: keyring integration.
-- `profile`: profile command handlers.
+- `config_command`: config command handlers.
 - `storage`: storage provider interface.
 - `storage::s3`: S3-compatible upload implementation.
 - `output`: URL and Markdown formatting.
@@ -62,4 +62,4 @@ Access keys are stored separately in the system keyring:
 ## Status
 
 This repository is in early scaffolding. The first implementation milestone is
-profile management plus single and recursive uploads to S3-compatible storage.
+config management plus single and recursive uploads to S3-compatible storage.

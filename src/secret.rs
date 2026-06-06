@@ -3,25 +3,29 @@ use keyring_core::{Entry, Error};
 
 const SERVICE: &str = "filelift";
 
-pub fn set_credentials(profile: &str, access_key_id: &str, secret_access_key: &str) -> Result<()> {
-    set_secret(&secret_account(profile, "access_key_id"), access_key_id)?;
+pub fn set_credentials(
+    config_name: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+) -> Result<()> {
+    set_secret(&secret_account(config_name, "access_key_id"), access_key_id)?;
     set_secret(
-        &secret_account(profile, "secret_access_key"),
+        &secret_account(config_name, "secret_access_key"),
         secret_access_key,
     )?;
     Ok(())
 }
 
-pub fn credentials(profile: &str) -> Result<Credentials> {
+pub fn credentials(config_name: &str) -> Result<Credentials> {
     Ok(Credentials {
-        access_key_id: get_secret(&secret_account(profile, "access_key_id"))?,
-        secret_access_key: get_secret(&secret_account(profile, "secret_access_key"))?,
+        access_key_id: get_secret(&secret_account(config_name, "access_key_id"))?,
+        secret_access_key: get_secret(&secret_account(config_name, "secret_access_key"))?,
     })
 }
 
-pub fn delete_credentials(profile: &str) -> Result<()> {
-    delete_secret(&secret_account(profile, "access_key_id"))?;
-    delete_secret(&secret_account(profile, "secret_access_key"))?;
+pub fn delete_credentials(config_name: &str) -> Result<()> {
+    delete_secret(&secret_account(config_name, "access_key_id"))?;
+    delete_secret(&secret_account(config_name, "secret_access_key"))?;
     Ok(())
 }
 
@@ -63,6 +67,6 @@ fn ensure_native_store() -> Result<()> {
     keyring::use_native_store(false).context("failed to initialize native keyring store")
 }
 
-fn secret_account(profile: &str, key: &str) -> String {
-    format!("{profile}:{key}")
+fn secret_account(config_name: &str, key: &str) -> String {
+    format!("{config_name}:{key}")
 }
