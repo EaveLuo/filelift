@@ -137,6 +137,7 @@ fn join_key(prefix: Option<&str>, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn joins_key_with_clean_prefix() {
@@ -145,5 +146,68 @@ mod tests {
             "blog/post/cover.webp"
         );
         assert_eq!(join_key(None, "/cover.webp"), "cover.webp");
+    }
+
+    #[test]
+    fn plans_single_file_upload_with_prefix() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let file_path = tempdir.path().join("cover.webp");
+        fs::write(&file_path, "image").unwrap();
+        let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
+
+        let items = plan_uploads(&file_path, Some("blog/post"), None, false).unwrap();
+
+        assert_eq!(
+            items,
+            vec![UploadItem {
+                local_path: file_path,
+                key: "blog/post/cover.webp".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn plans_single_file_upload_with_custom_name() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let file_path = tempdir.path().join("cover-original.webp");
+        fs::write(&file_path, "image").unwrap();
+        let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
+
+        let items = plan_uploads(&file_path, Some("blog/post"), Some("cover.webp"), false).unwrap();
+
+        assert_eq!(items[0].key, "blog/post/cover.webp");
+    }
+
+    #[test]
+    fn refuses_directory_without_recursive_flag() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let dir_path = Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf()).unwrap();
+
+        let error = plan_uploads(&dir_path, None, None, false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("--recursive"));
+    }
+
+    #[test]
+    fn plans_recursive_directory_upload_with_relative_keys() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let nested = tempdir.path().join("images").join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(tempdir.path().join("images").join("cover.webp"), "image").unwrap();
+        fs::write(nested.join("demo.mp4"), "video").unwrap();
+        let dir_path = Utf8PathBuf::from_path_buf(tempdir.path().join("images")).unwrap();
+
+        let items = plan_uploads(&dir_path, Some("blog/post"), None, true).unwrap();
+        let keys = items.into_iter().map(|item| item.key).collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec![
+                "blog/post/cover.webp".to_string(),
+                "blog/post/nested/demo.mp4".to_string(),
+            ]
+        );
     }
 }

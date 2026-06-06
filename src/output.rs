@@ -38,4 +38,12 @@ mod tests {
             "https://assets.example.com/base/blog/cover.webp"
         );
     }
+
+    #[test]
+    fn formats_markdown_image_link() {
+        assert_eq!(
+            markdown_image("cover", "https://assets.example.com/cover.webp"),
+            "![cover](https://assets.example.com/cover.webp)"
+        );
+    }
 }

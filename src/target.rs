@@ -64,3 +64,40 @@ pub fn target_store_path() -> Result<Utf8PathBuf> {
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_target_overrides_default_target() {
+        let store = TargetStore {
+            default_target: Some("r2-blog".to_string()),
+            targets: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            store.active_target_name(Some("s3-backup")).unwrap(),
+            "s3-backup"
+        );
+    }
+
+    #[test]
+    fn default_target_is_used_when_no_override_is_given() {
+        let store = TargetStore {
+            default_target: Some("r2-blog".to_string()),
+            targets: BTreeMap::new(),
+        };
+
+        assert_eq!(store.active_target_name(None).unwrap(), "r2-blog");
+    }
+
+    #[test]
+    fn missing_target_selection_returns_actionable_error() {
+        let store = TargetStore::default();
+        let error = store.active_target_name(None).unwrap_err().to_string();
+
+        assert!(error.contains("filelift target use"));
+        assert!(error.contains("--target"));
+    }
+}
