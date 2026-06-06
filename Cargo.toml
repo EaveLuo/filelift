@@ -1,6 +1,6 @@
 [package]
 name = "filelift"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A small CLI for lifting local files to S3-compatible object storage."
 license = "MIT"
