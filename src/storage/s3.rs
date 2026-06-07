@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use aws_config::BehaviorVersion;
-use aws_credential_types::Credentials;
-use aws_sdk_s3::{config::Region, primitives::ByteStream};
+use aws_sdk_s3::{
+    config::{BehaviorVersion, Credentials, Region},
+    primitives::ByteStream,
+};
 use camino::Utf8Path;
 
 use crate::{secret, target::UploadTarget};
@@ -21,14 +22,14 @@ impl Client {
             "filelift",
         );
 
-        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+        let sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
             .credentials_provider(sdk_credentials)
             .region(Region::new(target.region))
             .endpoint_url(target.endpoint)
-            .load()
-            .await;
+            .build();
 
-        let inner = aws_sdk_s3::Client::new(&sdk_config);
+        let inner = aws_sdk_s3::Client::from_conf(sdk_config);
 
         Ok(Self {
             inner,
