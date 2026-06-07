@@ -274,9 +274,14 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                 }
                 KeyEvent {
                     code: KeyCode::Backspace,
+                    modifiers,
                     ..
                 } => {
-                    backspace_before_cursor(&mut input, &mut cursor_index);
+                    if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                        clear_input(&mut input, &mut cursor_index);
+                    } else {
+                        backspace_before_cursor(&mut input, &mut cursor_index);
+                    }
                     history_cursor = None;
                     visible_hint = None;
                     candidates.clear();
@@ -748,6 +753,11 @@ fn backspace_before_cursor(input: &mut String, cursor_index: &mut usize) {
     delete_at_cursor(input, cursor_index);
 }
 
+fn clear_input(input: &mut String, cursor_index: &mut usize) {
+    input.clear();
+    *cursor_index = 0;
+}
+
 fn delete_at_cursor(input: &mut String, cursor_index: &mut usize) {
     if *cursor_index >= input.len() {
         return;
@@ -993,6 +1003,17 @@ mod tests {
         backspace_before_cursor(&mut input, &mut cursor_index);
         assert_eq!(input, "target update");
         assert_eq!(cursor_index, "target ".len());
+    }
+
+    #[test]
+    fn clears_input_and_cursor() {
+        let mut input = "target add --bucket assets".to_string();
+        let mut cursor_index = "target add".len();
+
+        clear_input(&mut input, &mut cursor_index);
+
+        assert!(input.is_empty());
+        assert_eq!(cursor_index, 0);
     }
 
     #[test]
