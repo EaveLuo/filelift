@@ -79,6 +79,35 @@ fn root_help_lists_completion_command() {
 }
 
 #[test]
+fn no_args_in_non_interactive_context_returns_actionable_error() {
+    let mut command = Command::cargo_bin("filelift").unwrap();
+
+    command
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "interactive mode requires a terminal",
+        ))
+        .stderr(predicate::str::contains("filelift target list"));
+}
+
+#[test]
+fn missing_target_name_in_non_interactive_context_returns_actionable_error() {
+    let config_dir = tempfile::tempdir().unwrap();
+    write_target_store_with_target_and_draft(config_dir.path());
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args(["target", "use"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target name required"))
+        .stderr(predicate::str::contains("filelift"));
+}
+
+#[test]
 fn hidden_target_completion_outputs_saved_targets_and_drafts() {
     let config_dir = tempfile::tempdir().unwrap();
     write_target_store_with_target_and_draft(config_dir.path());

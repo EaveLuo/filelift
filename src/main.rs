@@ -2,6 +2,7 @@ mod cli;
 mod completion_command;
 mod diagnostic_log;
 mod i18n;
+mod interactive;
 mod language_command;
 mod log_command;
 mod output;
@@ -38,11 +39,12 @@ async fn run() -> anyhow::Result<()> {
     let cli = Cli::from_arg_matches(&matches)?;
 
     let (command_name, result) = match cli.command {
-        Commands::Target(command) => ("target", target_command::run(command).await),
-        Commands::Upload(command) => ("upload", upload::run(command).await),
-        Commands::Log(command) => ("log", log_command::run(command)),
-        Commands::Language(command) => ("language", language_command::run(command)),
-        Commands::Completions(command) => ("completions", completion_command::run(command)),
+        Some(Commands::Target(command)) => ("target", target_command::run(command).await),
+        Some(Commands::Upload(command)) => ("upload", upload::run(command).await),
+        Some(Commands::Log(command)) => ("log", log_command::run(command)),
+        Some(Commands::Language(command)) => ("language", language_command::run(command)),
+        Some(Commands::Completions(command)) => ("completions", completion_command::run(command)),
+        None => ("interactive", interactive::run().await),
     };
 
     if let Err(error) = &result {

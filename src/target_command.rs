@@ -7,7 +7,7 @@ use crate::{
         TargetAddCommand, TargetCommands, TargetRemoveCommand, TargetUpdateCommand,
         TargetUseCommand,
     },
-    diagnostic_log, i18n, output, secret, storage,
+    diagnostic_log, i18n, interactive, output, secret, storage,
     target::{TargetStore, UploadTarget},
 };
 
@@ -144,7 +144,10 @@ fn save_draft_target(
 async fn update(command: TargetUpdateCommand) -> Result<()> {
     let mut store = TargetStore::load()?;
     let should_prompt_metadata = should_prompt_update_metadata(&command);
-    let name = command.name;
+    let name = interactive::resolve_target_name(
+        command.name,
+        interactive::TargetSelectionRequest::Update,
+    )?;
     let is_draft_resume =
         !store.targets.contains_key(&name) && store.draft_targets.contains_key(&name);
     let existing = store
@@ -487,39 +490,45 @@ fn list() -> Result<()> {
 
 fn use_target(command: TargetUseCommand) -> Result<()> {
     let mut store = TargetStore::load()?;
+    let name =
+        interactive::resolve_target_name(command.name, interactive::TargetSelectionRequest::Use)?;
     store
         .targets
-        .contains_key(&command.name)
+        .contains_key(&name)
         .then_some(())
-        .with_context(|| format!("target `{}` does not exist", command.name))?;
+        .with_context(|| format!("target `{name}` does not exist"))?;
 
-    store.default_target = Some(command.name.clone());
+    store.default_target = Some(name.clone());
     store.save()?;
-    diagnostic_log::record_command_result("target use", Some(&command.name), "success");
+    diagnostic_log::record_command_result("target use", Some(&name), "success");
     anstream::println!(
         "{}",
-        output::success(&i18n::t_args("target-using", &[("name", &command.name)]))
+        output::success(&i18n::t_args("target-using", &[("name", &name)]))
     );
     Ok(())
 }
 
 fn remove(command: TargetRemoveCommand) -> Result<()> {
     let mut store = TargetStore::load()?;
+    let name = interactive::resolve_target_name(
+        command.name,
+        interactive::TargetSelectionRequest::Remove,
+    )?;
     store
         .targets
-        .remove(&command.name)
-        .with_context(|| format!("target `{}` does not exist", command.name))?;
+        .remove(&name)
+        .with_context(|| format!("target `{name}` does not exist"))?;
 
-    if store.default_target.as_deref() == Some(command.name.as_str()) {
+    if store.default_target.as_deref() == Some(name.as_str()) {
         store.default_target = None;
     }
 
-    secret::delete_credentials(&command.name)?;
+    secret::delete_credentials(&name)?;
     store.save()?;
-    diagnostic_log::record_command_result("target remove", Some(&command.name), "success");
+    diagnostic_log::record_command_result("target remove", Some(&name), "success");
     anstream::println!(
         "{}",
-        output::success(&i18n::t_args("target-removed", &[("name", &command.name)]))
+        output::success(&i18n::t_args("target-removed", &[("name", &name)]))
     );
     Ok(())
 }

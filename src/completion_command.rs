@@ -37,16 +37,7 @@ pub fn complete_targets() -> Result<()> {
 
 fn target_names() -> Result<Vec<String>> {
     let store = TargetStore::load()?;
-    let mut names = store.targets.keys().cloned().collect::<Vec<_>>();
-    names.extend(
-        store
-            .draft_targets
-            .keys()
-            .filter(|name| !store.targets.contains_key(*name))
-            .cloned(),
-    );
-    names.sort();
-    Ok(names)
+    Ok(store.target_and_draft_names())
 }
 
 fn add_powershell_dynamic_target_completion(script: &mut String) {
