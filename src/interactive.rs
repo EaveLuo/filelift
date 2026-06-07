@@ -13,6 +13,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
 };
 use inquire::{Confirm, Select};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     interactive_completion::{self, CompletionResult, Suggestion},
@@ -384,14 +385,14 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                 }
                 KeyEvent {
                     code: KeyCode::Left,
-                    ..
-                }
-                | KeyEvent {
-                    code: KeyCode::Char('b'),
-                    modifiers: KeyModifiers::CONTROL,
+                    modifiers,
                     ..
                 } => {
-                    move_cursor_left(&input, &mut cursor_index);
+                    if modifiers.contains(KeyModifiers::CONTROL) {
+                        move_cursor_word_left(&input, &mut cursor_index);
+                    } else {
+                        move_cursor_left(&input, &mut cursor_index);
+                    }
                     candidates.clear();
                     visible_hint = None;
                     rendered_rows = render_screen(
@@ -405,14 +406,48 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                 }
                 KeyEvent {
                     code: KeyCode::Right,
+                    modifiers,
                     ..
+                } => {
+                    if modifiers.contains(KeyModifiers::CONTROL) {
+                        move_cursor_word_right(&input, &mut cursor_index);
+                    } else {
+                        move_cursor_right(&input, &mut cursor_index);
+                    }
+                    candidates.clear();
+                    visible_hint = None;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
                 }
-                | KeyEvent {
+                KeyEvent {
+                    code: KeyCode::Char('b'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    move_cursor_word_left(&input, &mut cursor_index);
+                    candidates.clear();
+                    visible_hint = None;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
+                }
+                KeyEvent {
                     code: KeyCode::Char('f'),
                     modifiers: KeyModifiers::CONTROL,
                     ..
                 } => {
-                    move_cursor_right(&input, &mut cursor_index);
+                    move_cursor_word_right(&input, &mut cursor_index);
                     candidates.clear();
                     visible_hint = None;
                     rendered_rows = render_screen(
@@ -554,9 +589,9 @@ fn render_screen(
         .unwrap_or(80);
     let hint_prefix = "  ";
     let hint_width = hint
-        .map(|hint| hint_prefix.chars().count() + hint.chars().count())
+        .map(|hint| display_width(hint_prefix) + display_width(hint))
         .unwrap_or_default();
-    let prompt_width = prompt.chars().count();
+    let prompt_width = display_width(prompt);
     let input_budget = width.saturating_sub(prompt_width + hint_width).max(8);
     let display_input = visible_tail(input, input_budget);
     let visible_cursor_offset = visible_cursor_offset(input, cursor_index, input_budget);
@@ -564,8 +599,8 @@ fn render_screen(
     write!(stdout, "{prompt}{display_input}")?;
     let cursor_column = (prompt_width + visible_cursor_offset).min(width.saturating_sub(1)) as u16;
     if let Some(hint) = hint {
-        let used = prompt_width + display_input.chars().count();
-        let hint_budget = width.saturating_sub(used + hint_prefix.chars().count());
+        let used = prompt_width + display_width(&display_input);
+        let hint_budget = width.saturating_sub(used + display_width(hint_prefix));
         let display_hint = visible_prefix(hint, hint_budget);
         execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
         write!(stdout, "{hint_prefix}{display_hint}")?;
@@ -618,49 +653,86 @@ fn clear_rendered_screen(stdout: &mut io::Stdout, rows_below_prompt: usize) -> R
 }
 
 fn visible_tail(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
+    if display_width(value) <= max_chars {
         return value.to_string();
     }
     if max_chars <= 3 {
         return ".".repeat(max_chars);
     }
 
-    let tail_width = max_chars.saturating_sub(3);
-    let mut tail = value.chars().rev().take(tail_width).collect::<Vec<_>>();
-    tail.reverse();
-    format!("...{}", tail.into_iter().collect::<String>())
+    let tail_budget = max_chars.saturating_sub(3);
+    let mut width = 0;
+    let mut start = value.len();
+    for (index, ch) in value.char_indices().rev() {
+        let ch_width = char_width(ch);
+        if width + ch_width > tail_budget {
+            break;
+        }
+        width += ch_width;
+        start = index;
+    }
+    format!("...{}", &value[start..])
 }
 
 fn visible_prefix(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
+    if display_width(value) <= max_chars {
         return value.to_string();
     }
     if max_chars <= 3 {
         return ".".repeat(max_chars);
     }
 
-    let prefix_width = max_chars.saturating_sub(3);
-    let prefix = value.chars().take(prefix_width).collect::<String>();
-    format!("{prefix}...")
+    let prefix_budget = max_chars.saturating_sub(3);
+    let mut width = 0;
+    let mut end = 0;
+    for (index, ch) in value.char_indices() {
+        let ch_width = char_width(ch);
+        if width + ch_width > prefix_budget {
+            break;
+        }
+        width += ch_width;
+        end = index + ch.len_utf8();
+    }
+    format!("{}...", &value[..end])
 }
 
 fn visible_cursor_offset(input: &str, cursor_index: usize, max_chars: usize) -> usize {
-    let total_chars = input.chars().count();
-    let cursor_chars = input[..cursor_index].chars().count();
-    if total_chars <= max_chars {
-        return cursor_chars;
+    if display_width(input) <= max_chars {
+        return display_width(&input[..cursor_index]);
     }
     if max_chars <= 3 {
         return 0;
     }
 
     let tail_width = max_chars.saturating_sub(3);
-    let hidden_chars = total_chars.saturating_sub(tail_width);
-    if cursor_chars <= hidden_chars {
+    let tail_start = visible_tail_start(input, tail_width);
+    if cursor_index <= tail_start {
         3
     } else {
-        3 + cursor_chars - hidden_chars
+        3 + display_width(&input[tail_start..cursor_index])
     }
+}
+
+fn visible_tail_start(value: &str, max_width: usize) -> usize {
+    let mut width = 0;
+    let mut start = value.len();
+    for (index, ch) in value.char_indices().rev() {
+        let ch_width = char_width(ch);
+        if width + ch_width > max_width {
+            break;
+        }
+        width += ch_width;
+        start = index;
+    }
+    start
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
+}
+
+fn char_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
 fn insert_at_cursor(input: &mut String, cursor_index: &mut usize, ch: char) {
@@ -696,6 +768,66 @@ fn move_cursor_right(input: &str, cursor_index: &mut usize) {
         return;
     }
     *cursor_index = next_char_boundary(input, *cursor_index);
+}
+
+fn move_cursor_word_left(input: &str, cursor_index: &mut usize) {
+    if *cursor_index == 0 {
+        return;
+    }
+
+    while *cursor_index > 0 {
+        let previous = previous_char_boundary(input, *cursor_index);
+        if !input[previous..*cursor_index]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            break;
+        }
+        *cursor_index = previous;
+    }
+
+    while *cursor_index > 0 {
+        let previous = previous_char_boundary(input, *cursor_index);
+        if input[previous..*cursor_index]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            break;
+        }
+        *cursor_index = previous;
+    }
+}
+
+fn move_cursor_word_right(input: &str, cursor_index: &mut usize) {
+    if *cursor_index >= input.len() {
+        return;
+    }
+
+    while *cursor_index < input.len() {
+        let next = next_char_boundary(input, *cursor_index);
+        if input[*cursor_index..next]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            break;
+        }
+        *cursor_index = next;
+    }
+
+    while *cursor_index < input.len() {
+        let next = next_char_boundary(input, *cursor_index);
+        if !input[*cursor_index..next]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            break;
+        }
+        *cursor_index = next;
+    }
 }
 
 fn previous_char_boundary(input: &str, cursor_index: usize) -> usize {
@@ -834,6 +966,23 @@ mod tests {
     }
 
     #[test]
+    fn truncation_respects_display_columns() {
+        let input = "\u{8bed}\u{8a00} use";
+
+        assert_eq!(display_width(input), 8);
+        assert_eq!(visible_tail(input, 7), "... use");
+        assert_eq!(visible_prefix(input, 7), "\u{8bed}\u{8a00}...");
+    }
+
+    #[test]
+    fn visible_cursor_offset_respects_wide_glyph_columns() {
+        let input = "\u{8bed}\u{8a00} use";
+        let after_wide_glyphs = "\u{8bed}\u{8a00}".len();
+
+        assert_eq!(visible_cursor_offset(input, after_wide_glyphs, 20), 4);
+    }
+
+    #[test]
     fn edits_at_cursor_without_appending() {
         let mut input = "target update".to_string();
         let mut cursor_index = "target ".len();
@@ -848,7 +997,7 @@ mod tests {
 
     #[test]
     fn cursor_movement_respects_utf8_boundaries() {
-        let input = "语言 use".to_string();
+        let input = "\u{8bed}\u{8a00} use".to_string();
         let mut cursor_index = input.len();
 
         move_cursor_left(&input, &mut cursor_index);
@@ -857,5 +1006,20 @@ mod tests {
 
         move_cursor_right(&input, &mut cursor_index);
         assert!(input.is_char_boundary(cursor_index));
+    }
+
+    #[test]
+    fn word_movement_skips_over_words() {
+        let input = "target update cf-wiki".to_string();
+        let mut cursor_index = input.len();
+
+        move_cursor_word_left(&input, &mut cursor_index);
+        assert_eq!(&input[cursor_index..], "cf-wiki");
+
+        move_cursor_word_left(&input, &mut cursor_index);
+        assert_eq!(&input[cursor_index..], "update cf-wiki");
+
+        move_cursor_word_right(&input, &mut cursor_index);
+        assert_eq!(&input[cursor_index..], "cf-wiki");
     }
 }
