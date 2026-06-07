@@ -62,8 +62,13 @@ pub async fn run() -> Result<()> {
 
         let mut args = parse_interactive_line(line)?;
         if let Some(request) = target_selection_request(args_as_strs(&args).as_slice()) {
-            let name = select_target_for_request(request)?;
-            args.push(name);
+            match select_target_for_request(request) {
+                Ok(name) => args.push(name),
+                Err(error) => {
+                    anstream::eprintln!("{}", output::warning(&format!("{error:#}")));
+                    continue;
+                }
+            }
         }
 
         if let Err(error) = run_filelift_command(&args) {
@@ -89,11 +94,62 @@ pub fn idle_hint(line: &str, targets: &[String]) -> Option<String> {
 }
 
 pub fn target_selection_request(args: &[&str]) -> Option<TargetSelectionRequest> {
-    match args {
-        ["target", "use"] => Some(TargetSelectionRequest::Use),
-        ["target", "update"] => Some(TargetSelectionRequest::Update),
-        ["target", "remove"] => Some(TargetSelectionRequest::Remove),
-        _ => None,
+    let ["target", subcommand, rest @ ..] = args else {
+        return None;
+    };
+
+    let request = match *subcommand {
+        "use" => TargetSelectionRequest::Use,
+        "update" => TargetSelectionRequest::Update,
+        "remove" => TargetSelectionRequest::Remove,
+        _ => return None,
+    };
+
+    if target_name_is_missing(request, rest) {
+        Some(request)
+    } else {
+        None
+    }
+}
+
+fn target_name_is_missing(request: TargetSelectionRequest, rest: &[&str]) -> bool {
+    let mut index = 0;
+    while index < rest.len() {
+        let token = rest[index];
+        if !token.starts_with('-') {
+            return false;
+        }
+
+        if let Some((name, _value)) = token.split_once('=') {
+            if option_takes_value(request, name) {
+                index += 1;
+                continue;
+            }
+        }
+
+        if option_takes_value(request, token) {
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+
+    true
+}
+
+fn option_takes_value(request: TargetSelectionRequest, option: &str) -> bool {
+    match request {
+        TargetSelectionRequest::Update => matches!(
+            option,
+            "--provider"
+                | "--bucket"
+                | "--endpoint"
+                | "--region"
+                | "--public-base-url"
+                | "--access-key-id"
+                | "--secret-access-key"
+        ),
+        TargetSelectionRequest::Use | TargetSelectionRequest::Remove => false,
     }
 }
 
@@ -206,11 +262,21 @@ fn read_line(targets: &[String]) -> Result<Option<String>> {
                 KeyEvent {
                     code: KeyCode::Tab, ..
                 } => {
-                    if let Some(name) = select_missing_target_from_input(&input)? {
-                        if !input.ends_with(' ') {
-                            input.push(' ');
+                    match select_missing_target_from_input(&input) {
+                        Ok(Some(name)) => {
+                            if !input.ends_with(' ') {
+                                input.push(' ');
+                            }
+                            input.push_str(&name);
                         }
-                        input.push_str(&name);
+                        Ok(None) => {}
+                        Err(error) => {
+                            let _ = with_raw_mode_suspended(|| {
+                                println!();
+                                anstream::eprintln!("{}", output::warning(&format!("{error:#}")));
+                                Ok(())
+                            });
+                        }
                     }
                     visible_hint = None;
                     last_edit = Instant::now();
@@ -246,11 +312,10 @@ fn select_missing_target_from_input(input: &str) -> Result<Option<String>> {
         return Ok(None);
     };
 
-    terminal::disable_raw_mode().context("failed to leave raw terminal mode")?;
-    println!();
-    let result = select_target_for_request(request).map(Some);
-    terminal::enable_raw_mode().context("failed to restore raw terminal mode")?;
-    result
+    with_raw_mode_suspended(|| {
+        println!();
+        select_target_for_request(request).map(Some)
+    })
 }
 
 fn run_filelift_command(args: &[String]) -> Result<()> {
@@ -271,13 +336,58 @@ fn args_as_strs(args: &[String]) -> Vec<&str> {
 
 fn render_line(stdout: &mut io::Stdout, input: &str, hint: Option<&str>) -> Result<()> {
     clear_line(stdout)?;
-    write!(stdout, "filelift> {input}")?;
+    let prompt = "filelift> ";
+    let width = terminal::size()
+        .map(|(width, _)| width as usize)
+        .unwrap_or(80);
+    let hint_prefix = "  ";
+    let hint_width = hint
+        .map(|hint| hint_prefix.chars().count() + hint.chars().count())
+        .unwrap_or_default();
+    let prompt_width = prompt.chars().count();
+    let input_budget = width.saturating_sub(prompt_width + hint_width).max(8);
+    let display_input = visible_tail(input, input_budget);
+
+    write!(stdout, "{prompt}{display_input}")?;
+    let cursor_column =
+        (prompt_width + display_input.chars().count()).min(width.saturating_sub(1)) as u16;
     if let Some(hint) = hint {
+        let used = prompt_width + display_input.chars().count();
+        let hint_budget = width.saturating_sub(used + hint_prefix.chars().count());
+        let display_hint = visible_prefix(hint, hint_budget);
         execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
-        write!(stdout, "  {hint}")?;
+        write!(stdout, "{hint_prefix}{display_hint}")?;
         execute!(stdout, ResetColor)?;
+        execute!(stdout, cursor::MoveToColumn(cursor_column))?;
     }
     stdout.flush().context("failed to flush terminal")
+}
+
+fn visible_tail(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let tail_width = max_chars.saturating_sub(3);
+    let mut tail = value.chars().rev().take(tail_width).collect::<Vec<_>>();
+    tail.reverse();
+    format!("...{}", tail.into_iter().collect::<String>())
+}
+
+fn visible_prefix(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let prefix_width = max_chars.saturating_sub(3);
+    let prefix = value.chars().take(prefix_width).collect::<String>();
+    format!("{prefix}...")
 }
 
 fn clear_line(stdout: &mut io::Stdout) -> Result<()> {
@@ -301,6 +411,18 @@ impl RawMode {
 impl Drop for RawMode {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
+    }
+}
+
+fn with_raw_mode_suspended<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    terminal::disable_raw_mode().context("failed to leave raw terminal mode")?;
+    let result = operation();
+    let restore_result = terminal::enable_raw_mode().context("failed to restore raw terminal mode");
+    match (result, restore_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(restore_error)) => Err(error.context(restore_error)),
     }
 }
 
@@ -354,5 +476,28 @@ mod tests {
             None
         );
         assert_eq!(target_selection_request(&["target", "list"]), None);
+    }
+
+    #[test]
+    fn detects_missing_target_name_when_options_are_present() {
+        assert_eq!(
+            target_selection_request(&["target", "update", "--bucket", "assets"]),
+            Some(TargetSelectionRequest::Update)
+        );
+        assert_eq!(
+            target_selection_request(&["target", "update", "--skip-check"]),
+            Some(TargetSelectionRequest::Update)
+        );
+        assert_eq!(
+            target_selection_request(&["target", "update", "r2-blog", "--bucket", "assets"]),
+            None
+        );
+    }
+
+    #[test]
+    fn truncates_long_input_without_exceeding_budget() {
+        assert_eq!(visible_tail("abcdef", 4), "...f");
+        assert_eq!(visible_prefix("abcdef", 4), "a...");
+        assert_eq!(visible_prefix("abcdef", 2), "..");
     }
 }
