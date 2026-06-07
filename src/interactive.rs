@@ -120,11 +120,11 @@ fn target_name_is_missing(request: TargetSelectionRequest, rest: &[&str]) -> boo
             return false;
         }
 
-        if let Some((name, _value)) = token.split_once('=') {
-            if option_takes_value(request, name) {
-                index += 1;
-                continue;
-            }
+        if let Some((name, _value)) = token.split_once('=')
+            && option_takes_value(request, name)
+        {
+            index += 1;
+            continue;
         }
 
         if option_takes_value(request, token) {
