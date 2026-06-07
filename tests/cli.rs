@@ -67,18 +67,6 @@ fn root_help_lists_target_and_upload_commands() {
 }
 
 #[test]
-fn root_help_lists_completion_command() {
-    let mut command = Command::cargo_bin("filelift").unwrap();
-
-    command
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("completions"))
-        .stdout(predicate::str::contains("Generate shell completions"));
-}
-
-#[test]
 fn no_args_in_non_interactive_context_returns_actionable_error() {
     let mut command = Command::cargo_bin("filelift").unwrap();
 
@@ -105,34 +93,6 @@ fn missing_target_name_in_non_interactive_context_returns_actionable_error() {
         .failure()
         .stderr(predicate::str::contains("target name required"))
         .stderr(predicate::str::contains("filelift"));
-}
-
-#[test]
-fn hidden_target_completion_outputs_saved_targets_and_drafts() {
-    let config_dir = tempfile::tempdir().unwrap();
-    write_target_store_with_target_and_draft(config_dir.path());
-
-    let mut command = Command::cargo_bin("filelift").unwrap();
-    with_home_dir(&mut command, config_dir.path());
-
-    command
-        .args(["__complete", "targets"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("r2-blog\n"))
-        .stdout(predicate::str::contains("draft-cdn\n"));
-}
-
-#[test]
-fn powershell_completions_include_dynamic_target_lookup() {
-    let mut command = Command::cargo_bin("filelift").unwrap();
-
-    command
-        .args(["completions", "powershell"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Register-ArgumentCompleter"))
-        .stdout(predicate::str::contains("filelift __complete targets"));
 }
 
 #[test]

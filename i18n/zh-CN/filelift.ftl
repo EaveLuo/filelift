@@ -3,7 +3,6 @@ cmd-target-about = 管理上传 target
 cmd-upload-about = 上传文件或目录
 cmd-log-about = 管理诊断日志
 cmd-language-about = 管理 CLI 语言
-cmd-completions-about = 生成 shell 补全脚本
 cmd-target-add-about = 添加上传 target
 cmd-target-update-about = 更新上传 target
 cmd-target-list-about = 列出已配置的上传 target

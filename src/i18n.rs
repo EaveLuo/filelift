@@ -114,9 +114,6 @@ pub fn localize_command(command: Command) -> Command {
                 })
                 .mut_subcommand("use", |command| command.about(t("cmd-language-use-about")))
         })
-        .mut_subcommand("completions", |command| {
-            command.about(t("cmd-completions-about"))
-        })
 }
 
 fn loader() -> FluentLanguageLoader {

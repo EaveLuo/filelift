@@ -1,5 +1,4 @@
 mod cli;
-mod completion_command;
 mod diagnostic_log;
 mod i18n;
 mod interactive;
@@ -30,10 +29,6 @@ async fn main() -> ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     diagnostic_log::init();
-    if run_internal_completion()? {
-        return Ok(());
-    }
-
     let command = i18n::localize_command(Cli::command());
     let matches = command.get_matches();
     let cli = Cli::from_arg_matches(&matches)?;
@@ -43,7 +38,6 @@ async fn run() -> anyhow::Result<()> {
         Some(Commands::Upload(command)) => ("upload", upload::run(command).await),
         Some(Commands::Log(command)) => ("log", log_command::run(command)),
         Some(Commands::Language(command)) => ("language", language_command::run(command)),
-        Some(Commands::Completions(command)) => ("completions", completion_command::run(command)),
         None => ("interactive", interactive::run().await),
     };
 
@@ -57,18 +51,4 @@ async fn run() -> anyhow::Result<()> {
     }
 
     result
-}
-
-fn run_internal_completion() -> anyhow::Result<bool> {
-    let args = std::env::args().collect::<Vec<_>>();
-    if args.get(1).map(String::as_str) != Some("__complete") {
-        return Ok(false);
-    }
-
-    match args.get(2).map(String::as_str) {
-        Some("targets") => completion_command::complete_targets()?,
-        _ => anyhow::bail!("unknown completion source"),
-    }
-
-    Ok(true)
 }

@@ -3,7 +3,6 @@ cmd-target-about = Manage upload targets
 cmd-upload-about = Upload a file or directory
 cmd-log-about = Manage diagnostic logs
 cmd-language-about = Manage CLI language
-cmd-completions-about = Generate shell completions
 cmd-target-add-about = Add an upload target
 cmd-target-update-about = Update an upload target
 cmd-target-list-about = List configured upload targets
