@@ -23,6 +23,12 @@ use crate::{
 const IDLE_HINT_DELAY: Duration = Duration::from_millis(1200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    Insert,
+    Normal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetSelectionRequest {
     Use,
     Update,
@@ -209,12 +215,23 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
     let _raw_mode = RawMode::enter()?;
     let mut stdout = io::stdout();
     let mut input = String::new();
+    let mut cursor_index = 0;
     let mut visible_hint: Option<String> = None;
+    let mut candidates = Vec::new();
+    let mut rendered_rows = 0;
     let mut last_edit = Instant::now();
     let mut history_cursor: Option<usize> = None;
     let mut history_draft = String::new();
+    let mut mode = InputMode::Insert;
 
-    render_line(&mut stdout, &input, visible_hint.as_deref())?;
+    rendered_rows = render_screen(
+        &mut stdout,
+        rendered_rows,
+        &input,
+        cursor_index,
+        visible_hint.as_deref(),
+        &candidates,
+    )?;
 
     loop {
         if event::poll(Duration::from_millis(80)).context("failed to poll terminal input")? {
@@ -237,7 +254,7 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                     modifiers: KeyModifiers::CONTROL,
                     ..
                 } => {
-                    clear_line(&mut stdout)?;
+                    clear_rendered_screen(&mut stdout, rendered_rows)?;
                     writeln!(stdout)?;
                     return Ok(None);
                 }
@@ -245,7 +262,7 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                     code: KeyCode::Enter,
                     ..
                 } => {
-                    clear_line(&mut stdout)?;
+                    clear_rendered_screen(&mut stdout, rendered_rows)?;
                     write!(stdout, "filelift> {}", input)?;
                     writeln!(stdout)?;
                     let line = input.trim();
@@ -258,26 +275,63 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                     code: KeyCode::Backspace,
                     ..
                 } => {
-                    input.pop();
+                    backspace_before_cursor(&mut input, &mut cursor_index);
                     history_cursor = None;
                     visible_hint = None;
+                    candidates.clear();
                     last_edit = Instant::now();
-                    render_line(&mut stdout, &input, None)?;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
+                }
+                KeyEvent {
+                    code: KeyCode::Delete,
+                    ..
+                } => {
+                    delete_at_cursor(&mut input, &mut cursor_index);
+                    history_cursor = None;
+                    visible_hint = None;
+                    candidates.clear();
+                    last_edit = Instant::now();
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
                 }
                 KeyEvent {
                     code: KeyCode::Tab, ..
                 } => {
                     match interactive_completion::complete(&input, targets) {
-                        CompletionResult::Insert(completed) => input = completed,
-                        CompletionResult::Candidates(candidates) => {
-                            render_completion_candidates(&mut stdout, &candidates)?
+                        CompletionResult::Insert(completed) => {
+                            input = completed;
+                            cursor_index = input.len();
+                            candidates.clear();
+                        }
+                        CompletionResult::Candidates(next_candidates) => {
+                            candidates = next_candidates
                         }
                         CompletionResult::None => {}
                     }
                     history_cursor = None;
                     visible_hint = None;
                     last_edit = Instant::now();
-                    render_line(&mut stdout, &input, None)?;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
                 }
                 KeyEvent {
                     code: KeyCode::Up, ..
@@ -290,8 +344,17 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                             *index = index.saturating_sub(1);
                         }
                         input = history[history_cursor.unwrap()].clone();
+                        cursor_index = input.len();
                         visible_hint = None;
-                        render_line(&mut stdout, &input, None)?;
+                        candidates.clear();
+                        rendered_rows = render_screen(
+                            &mut stdout,
+                            rendered_rows,
+                            &input,
+                            cursor_index,
+                            None,
+                            &candidates,
+                        )?;
                     }
                 }
                 KeyEvent {
@@ -306,9 +369,116 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                             history_cursor = None;
                             input = history_draft.clone();
                         }
+                        cursor_index = input.len();
                         visible_hint = None;
-                        render_line(&mut stdout, &input, None)?;
+                        candidates.clear();
+                        rendered_rows = render_screen(
+                            &mut stdout,
+                            rendered_rows,
+                            &input,
+                            cursor_index,
+                            None,
+                            &candidates,
+                        )?;
                     }
+                }
+                KeyEvent {
+                    code: KeyCode::Left,
+                    ..
+                }
+                | KeyEvent {
+                    code: KeyCode::Char('b'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    move_cursor_left(&input, &mut cursor_index);
+                    candidates.clear();
+                    visible_hint = None;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
+                }
+                KeyEvent {
+                    code: KeyCode::Right,
+                    ..
+                }
+                | KeyEvent {
+                    code: KeyCode::Char('f'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    move_cursor_right(&input, &mut cursor_index);
+                    candidates.clear();
+                    visible_hint = None;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
+                }
+                KeyEvent {
+                    code: KeyCode::Home,
+                    ..
+                }
+                | KeyEvent {
+                    code: KeyCode::Char('a'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    cursor_index = 0;
+                    candidates.clear();
+                    visible_hint = None;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
+                }
+                KeyEvent {
+                    code: KeyCode::End, ..
+                }
+                | KeyEvent {
+                    code: KeyCode::Char('e'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    cursor_index = input.len();
+                    candidates.clear();
+                    visible_hint = None;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
+                }
+                KeyEvent {
+                    code: KeyCode::Esc, ..
+                } => {
+                    mode = InputMode::Normal;
+                    candidates.clear();
+                    visible_hint = None;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
                 }
                 KeyEvent {
                     code: KeyCode::Char(ch),
@@ -317,18 +487,37 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                 } if !modifiers.contains(KeyModifiers::CONTROL)
                     && !modifiers.contains(KeyModifiers::ALT) =>
                 {
-                    input.push(ch);
+                    if mode == InputMode::Normal {
+                        handle_normal_mode_key(ch, &mut mode, &mut input, &mut cursor_index);
+                    } else {
+                        insert_at_cursor(&mut input, &mut cursor_index, ch);
+                    }
                     history_cursor = None;
                     visible_hint = None;
+                    candidates.clear();
                     last_edit = Instant::now();
-                    render_line(&mut stdout, &input, None)?;
+                    rendered_rows = render_screen(
+                        &mut stdout,
+                        rendered_rows,
+                        &input,
+                        cursor_index,
+                        None,
+                        &candidates,
+                    )?;
                 }
                 _ => {}
             }
         } else if visible_hint.is_none() && last_edit.elapsed() >= IDLE_HINT_DELAY {
             visible_hint = idle_hint(&input, targets);
             if visible_hint.is_some() {
-                render_line(&mut stdout, &input, visible_hint.as_deref())?;
+                rendered_rows = render_screen(
+                    &mut stdout,
+                    rendered_rows,
+                    &input,
+                    cursor_index,
+                    visible_hint.as_deref(),
+                    &candidates,
+                )?;
             }
         }
     }
@@ -346,30 +535,19 @@ fn run_filelift_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn render_completion_candidates(stdout: &mut io::Stdout, candidates: &[Suggestion]) -> Result<()> {
-    clear_line(stdout)?;
-    writeln!(stdout)?;
-    for suggestion in candidates.iter().take(8) {
-        execute!(stdout, SetForegroundColor(Color::Cyan))?;
-        write!(stdout, "  {}", suggestion.value)?;
-        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
-        writeln!(stdout, "  {}", suggestion.description)?;
-        execute!(stdout, ResetColor)?;
-    }
-    if candidates.len() > 8 {
-        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
-        writeln!(stdout, "  ... {} more", candidates.len() - 8)?;
-        execute!(stdout, ResetColor)?;
-    }
-    stdout.flush().context("failed to render completions")
-}
-
 fn args_as_strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
 }
 
-fn render_line(stdout: &mut io::Stdout, input: &str, hint: Option<&str>) -> Result<()> {
-    clear_line(stdout)?;
+fn render_screen(
+    stdout: &mut io::Stdout,
+    previous_rows: usize,
+    input: &str,
+    cursor_index: usize,
+    hint: Option<&str>,
+    candidates: &[Suggestion],
+) -> Result<usize> {
+    clear_rendered_screen(stdout, previous_rows)?;
     let prompt = "filelift> ";
     let width = terminal::size()
         .map(|(width, _)| width as usize)
@@ -381,10 +559,10 @@ fn render_line(stdout: &mut io::Stdout, input: &str, hint: Option<&str>) -> Resu
     let prompt_width = prompt.chars().count();
     let input_budget = width.saturating_sub(prompt_width + hint_width).max(8);
     let display_input = visible_tail(input, input_budget);
+    let visible_cursor_offset = visible_cursor_offset(input, cursor_index, input_budget);
 
     write!(stdout, "{prompt}{display_input}")?;
-    let cursor_column =
-        (prompt_width + display_input.chars().count()).min(width.saturating_sub(1)) as u16;
+    let cursor_column = (prompt_width + visible_cursor_offset).min(width.saturating_sub(1)) as u16;
     if let Some(hint) = hint {
         let used = prompt_width + display_input.chars().count();
         let hint_budget = width.saturating_sub(used + hint_prefix.chars().count());
@@ -392,9 +570,51 @@ fn render_line(stdout: &mut io::Stdout, input: &str, hint: Option<&str>) -> Resu
         execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
         write!(stdout, "{hint_prefix}{display_hint}")?;
         execute!(stdout, ResetColor)?;
-        execute!(stdout, cursor::MoveToColumn(cursor_column))?;
     }
-    stdout.flush().context("failed to flush terminal")
+
+    for suggestion in candidates {
+        writeln!(stdout)?;
+        execute!(stdout, SetForegroundColor(Color::Cyan))?;
+        write!(stdout, "  {}", suggestion.value)?;
+        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        write!(stdout, "  {}", suggestion.description)?;
+        execute!(stdout, ResetColor)?;
+    }
+
+    if !candidates.is_empty() {
+        execute!(stdout, cursor::MoveUp(candidates.len() as u16))?;
+    }
+    execute!(stdout, cursor::MoveToColumn(cursor_column))?;
+    stdout.flush().context("failed to flush terminal")?;
+    Ok(candidates.len())
+}
+
+fn clear_rendered_screen(stdout: &mut io::Stdout, rows_below_prompt: usize) -> Result<()> {
+    execute!(
+        stdout,
+        cursor::MoveToColumn(0),
+        Clear(ClearType::CurrentLine)
+    )
+    .context("failed to clear interactive prompt")?;
+
+    for _ in 0..rows_below_prompt {
+        execute!(
+            stdout,
+            cursor::MoveDown(1),
+            cursor::MoveToColumn(0),
+            Clear(ClearType::CurrentLine)
+        )
+        .context("failed to clear interactive completions")?;
+    }
+    if rows_below_prompt > 0 {
+        execute!(
+            stdout,
+            cursor::MoveUp(rows_below_prompt as u16),
+            cursor::MoveToColumn(0)
+        )
+        .context("failed to restore interactive cursor")?;
+    }
+    Ok(())
 }
 
 fn visible_tail(value: &str, max_chars: usize) -> String {
@@ -424,13 +644,103 @@ fn visible_prefix(value: &str, max_chars: usize) -> String {
     format!("{prefix}...")
 }
 
-fn clear_line(stdout: &mut io::Stdout) -> Result<()> {
-    execute!(
-        stdout,
-        cursor::MoveToColumn(0),
-        Clear(ClearType::CurrentLine)
-    )
-    .context("failed to redraw terminal")
+fn visible_cursor_offset(input: &str, cursor_index: usize, max_chars: usize) -> usize {
+    let total_chars = input.chars().count();
+    let cursor_chars = input[..cursor_index].chars().count();
+    if total_chars <= max_chars {
+        return cursor_chars;
+    }
+    if max_chars <= 3 {
+        return 0;
+    }
+
+    let tail_width = max_chars.saturating_sub(3);
+    let hidden_chars = total_chars.saturating_sub(tail_width);
+    if cursor_chars <= hidden_chars {
+        3
+    } else {
+        3 + cursor_chars - hidden_chars
+    }
+}
+
+fn insert_at_cursor(input: &mut String, cursor_index: &mut usize, ch: char) {
+    input.insert(*cursor_index, ch);
+    *cursor_index += ch.len_utf8();
+}
+
+fn backspace_before_cursor(input: &mut String, cursor_index: &mut usize) {
+    if *cursor_index == 0 {
+        return;
+    }
+    move_cursor_left(input, cursor_index);
+    delete_at_cursor(input, cursor_index);
+}
+
+fn delete_at_cursor(input: &mut String, cursor_index: &mut usize) {
+    if *cursor_index >= input.len() {
+        return;
+    }
+    let next = next_char_boundary(input, *cursor_index);
+    input.replace_range(*cursor_index..next, "");
+}
+
+fn move_cursor_left(input: &str, cursor_index: &mut usize) {
+    if *cursor_index == 0 {
+        return;
+    }
+    *cursor_index = previous_char_boundary(input, *cursor_index);
+}
+
+fn move_cursor_right(input: &str, cursor_index: &mut usize) {
+    if *cursor_index >= input.len() {
+        return;
+    }
+    *cursor_index = next_char_boundary(input, *cursor_index);
+}
+
+fn previous_char_boundary(input: &str, cursor_index: usize) -> usize {
+    input[..cursor_index]
+        .char_indices()
+        .last()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(input: &str, cursor_index: usize) -> usize {
+    input[cursor_index..]
+        .char_indices()
+        .nth(1)
+        .map(|(index, _)| cursor_index + index)
+        .unwrap_or(input.len())
+}
+
+fn handle_normal_mode_key(
+    ch: char,
+    mode: &mut InputMode,
+    input: &mut String,
+    cursor_index: &mut usize,
+) {
+    match ch {
+        'h' => move_cursor_left(input, cursor_index),
+        'l' => move_cursor_right(input, cursor_index),
+        '0' => *cursor_index = 0,
+        '$' => *cursor_index = input.len(),
+        'x' => delete_at_cursor(input, cursor_index),
+        'i' => *mode = InputMode::Insert,
+        'a' => {
+            move_cursor_right(input, cursor_index);
+            *mode = InputMode::Insert;
+        }
+        'I' => {
+            *cursor_index = 0;
+            *mode = InputMode::Insert;
+        }
+        'A' => {
+            *cursor_index = input.len();
+            *mode = InputMode::Insert;
+        }
+        _ => {}
+    }
 }
 
 struct RawMode;
@@ -521,5 +831,31 @@ mod tests {
         assert_eq!(visible_tail("abcdef", 4), "...f");
         assert_eq!(visible_prefix("abcdef", 4), "a...");
         assert_eq!(visible_prefix("abcdef", 2), "..");
+    }
+
+    #[test]
+    fn edits_at_cursor_without_appending() {
+        let mut input = "target update".to_string();
+        let mut cursor_index = "target ".len();
+
+        insert_at_cursor(&mut input, &mut cursor_index, 'X');
+        assert_eq!(input, "target Xupdate");
+
+        backspace_before_cursor(&mut input, &mut cursor_index);
+        assert_eq!(input, "target update");
+        assert_eq!(cursor_index, "target ".len());
+    }
+
+    #[test]
+    fn cursor_movement_respects_utf8_boundaries() {
+        let input = "语言 use".to_string();
+        let mut cursor_index = input.len();
+
+        move_cursor_left(&input, &mut cursor_index);
+        move_cursor_left(&input, &mut cursor_index);
+        assert!(input.is_char_boundary(cursor_index));
+
+        move_cursor_right(&input, &mut cursor_index);
+        assert!(input.is_char_boundary(cursor_index));
     }
 }
