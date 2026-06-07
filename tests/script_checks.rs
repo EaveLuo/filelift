@@ -42,3 +42,15 @@ fn release_workflow_uploads_installer_assets() {
     assert!(workflow.contains("filelift-aarch64-apple-darwin.tar.gz"));
     assert!(workflow.contains("softprops/action-gh-release"));
 }
+
+#[test]
+fn release_workflow_publishes_crate() {
+    let workflow =
+        fs::read_to_string(".github/workflows/release.yml").expect("release workflow should exist");
+
+    assert!(workflow.contains("cargo-publish"));
+    assert!(workflow.contains("CARGO_REGISTRY_TOKEN"));
+    assert!(workflow.contains("cargo publish --locked"));
+    assert!(workflow.contains("Verify release tag matches Cargo version"));
+    assert!(workflow.contains("expected=\"v${version}\""));
+}
