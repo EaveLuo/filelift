@@ -14,11 +14,13 @@ use crossterm::{
 };
 use inquire::{Confirm, Select};
 
-use crate::{output, target::TargetStore};
+use crate::{
+    interactive_completion::{self, CompletionResult, Suggestion},
+    output,
+    target::TargetStore,
+};
 
 const IDLE_HINT_DELAY: Duration = Duration::from_millis(1200);
-const MISSING_TARGET_HINT: &str =
-    "hint: choose a target with Tab, press Enter to select, or keep typing a name";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetSelectionRequest {
@@ -45,11 +47,13 @@ pub async fn run() -> Result<()> {
         output::info("filelift interactive mode. Type `exit` to leave.")
     );
 
+    let mut history = Vec::new();
+
     loop {
         let targets = TargetStore::load()
             .map(|store| store.target_and_draft_names())
             .unwrap_or_default();
-        let Some(line) = read_line(&targets)? else {
+        let Some(line) = read_line(&targets, &mut history)? else {
             break;
         };
         let line = line.trim();
@@ -84,13 +88,7 @@ pub fn parse_interactive_line(line: &str) -> Result<Vec<String>> {
 }
 
 pub fn idle_hint(line: &str, targets: &[String]) -> Option<String> {
-    if targets.is_empty() {
-        return None;
-    }
-
-    let args = parse_interactive_line(line).ok()?;
-    let args = args_as_strs(&args);
-    target_selection_request(args.as_slice()).map(|_| MISSING_TARGET_HINT.to_string())
+    interactive_completion::hint(line, targets)
 }
 
 pub fn target_selection_request(args: &[&str]) -> Option<TargetSelectionRequest> {
@@ -207,12 +205,14 @@ fn select_target_name(message: &str, scope: TargetSelectionScope) -> Result<Stri
         .context("failed to select target")
 }
 
-fn read_line(targets: &[String]) -> Result<Option<String>> {
+fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<String>> {
     let _raw_mode = RawMode::enter()?;
     let mut stdout = io::stdout();
     let mut input = String::new();
     let mut visible_hint: Option<String> = None;
     let mut last_edit = Instant::now();
+    let mut history_cursor: Option<usize> = None;
+    let mut history_draft = String::new();
 
     render_line(&mut stdout, &input, visible_hint.as_deref())?;
 
@@ -248,6 +248,10 @@ fn read_line(targets: &[String]) -> Result<Option<String>> {
                     clear_line(&mut stdout)?;
                     write!(stdout, "filelift> {}", input)?;
                     writeln!(stdout)?;
+                    let line = input.trim();
+                    if !line.is_empty() && history.last().is_none_or(|last| last != line) {
+                        history.push(line.to_string());
+                    }
                     return Ok(Some(input));
                 }
                 KeyEvent {
@@ -255,6 +259,7 @@ fn read_line(targets: &[String]) -> Result<Option<String>> {
                     ..
                 } => {
                     input.pop();
+                    history_cursor = None;
                     visible_hint = None;
                     last_edit = Instant::now();
                     render_line(&mut stdout, &input, None)?;
@@ -262,25 +267,48 @@ fn read_line(targets: &[String]) -> Result<Option<String>> {
                 KeyEvent {
                     code: KeyCode::Tab, ..
                 } => {
-                    match select_missing_target_from_input(&input) {
-                        Ok(Some(name)) => {
-                            if !input.ends_with(' ') {
-                                input.push(' ');
-                            }
-                            input.push_str(&name);
+                    match interactive_completion::complete(&input, targets) {
+                        CompletionResult::Insert(completed) => input = completed,
+                        CompletionResult::Candidates(candidates) => {
+                            render_completion_candidates(&mut stdout, &candidates)?
                         }
-                        Ok(None) => {}
-                        Err(error) => {
-                            let _ = with_raw_mode_suspended(|| {
-                                println!();
-                                anstream::eprintln!("{}", output::warning(&format!("{error:#}")));
-                                Ok(())
-                            });
-                        }
+                        CompletionResult::None => {}
                     }
+                    history_cursor = None;
                     visible_hint = None;
                     last_edit = Instant::now();
                     render_line(&mut stdout, &input, None)?;
+                }
+                KeyEvent {
+                    code: KeyCode::Up, ..
+                } => {
+                    if !history.is_empty() {
+                        if history_cursor.is_none() {
+                            history_draft = input.clone();
+                            history_cursor = Some(history.len() - 1);
+                        } else if let Some(index) = history_cursor.as_mut() {
+                            *index = index.saturating_sub(1);
+                        }
+                        input = history[history_cursor.unwrap()].clone();
+                        visible_hint = None;
+                        render_line(&mut stdout, &input, None)?;
+                    }
+                }
+                KeyEvent {
+                    code: KeyCode::Down,
+                    ..
+                } => {
+                    if let Some(index) = history_cursor {
+                        if index + 1 < history.len() {
+                            history_cursor = Some(index + 1);
+                            input = history[index + 1].clone();
+                        } else {
+                            history_cursor = None;
+                            input = history_draft.clone();
+                        }
+                        visible_hint = None;
+                        render_line(&mut stdout, &input, None)?;
+                    }
                 }
                 KeyEvent {
                     code: KeyCode::Char(ch),
@@ -290,6 +318,7 @@ fn read_line(targets: &[String]) -> Result<Option<String>> {
                     && !modifiers.contains(KeyModifiers::ALT) =>
                 {
                     input.push(ch);
+                    history_cursor = None;
                     visible_hint = None;
                     last_edit = Instant::now();
                     render_line(&mut stdout, &input, None)?;
@@ -305,19 +334,6 @@ fn read_line(targets: &[String]) -> Result<Option<String>> {
     }
 }
 
-fn select_missing_target_from_input(input: &str) -> Result<Option<String>> {
-    let args = parse_interactive_line(input)?;
-    let args = args_as_strs(&args);
-    let Some(request) = target_selection_request(args.as_slice()) else {
-        return Ok(None);
-    };
-
-    with_raw_mode_suspended(|| {
-        println!();
-        select_target_for_request(request).map(Some)
-    })
-}
-
 fn run_filelift_command(args: &[String]) -> Result<()> {
     let executable = std::env::current_exe().context("failed to resolve filelift executable")?;
     let status = Command::new(executable)
@@ -328,6 +344,24 @@ fn run_filelift_command(args: &[String]) -> Result<()> {
         bail!("command exited with status {status}");
     }
     Ok(())
+}
+
+fn render_completion_candidates(stdout: &mut io::Stdout, candidates: &[Suggestion]) -> Result<()> {
+    clear_line(stdout)?;
+    writeln!(stdout)?;
+    for suggestion in candidates.iter().take(8) {
+        execute!(stdout, SetForegroundColor(Color::Cyan))?;
+        write!(stdout, "  {}", suggestion.value)?;
+        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        writeln!(stdout, "  {}", suggestion.description)?;
+        execute!(stdout, ResetColor)?;
+    }
+    if candidates.len() > 8 {
+        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        writeln!(stdout, "  ... {} more", candidates.len() - 8)?;
+        execute!(stdout, ResetColor)?;
+    }
+    stdout.flush().context("failed to render completions")
 }
 
 fn args_as_strs(args: &[String]) -> Vec<&str> {
@@ -414,18 +448,6 @@ impl Drop for RawMode {
     }
 }
 
-fn with_raw_mode_suspended<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    terminal::disable_raw_mode().context("failed to leave raw terminal mode")?;
-    let result = operation();
-    let restore_result = terminal::enable_raw_mode().context("failed to restore raw terminal mode");
-    match (result, restore_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(restore_error)) => Err(error.context(restore_error)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,7 +468,7 @@ mod tests {
 
         assert_eq!(
             idle_hint("target update", &targets).unwrap(),
-            "hint: choose a target with Tab, press Enter to select, or keep typing a name"
+            "hint: assets-cdn | r2-blog"
         );
     }
 

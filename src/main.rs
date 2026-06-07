@@ -2,6 +2,7 @@ mod cli;
 mod diagnostic_log;
 mod i18n;
 mod interactive;
+mod interactive_completion;
 mod language_command;
 mod log_command;
 mod output;
