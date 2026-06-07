@@ -1,5 +1,6 @@
 use camino::Utf8PathBuf;
 use clap::{Args, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Debug, Parser)]
 #[command(name = "filelift", version, about)]
@@ -21,6 +22,8 @@ pub enum Commands {
     #[command(about = "Manage CLI language")]
     #[command(subcommand)]
     Language(LanguageCommands),
+    #[command(name = "completions", about = "Generate shell completions")]
+    Completions(CompletionsCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -51,6 +54,12 @@ pub enum LanguageCommands {
     Show,
     #[command(about = "Set the CLI language")]
     Use(LanguageUseCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsCommand {
+    #[arg(value_enum)]
+    pub shell: Shell,
 }
 
 #[derive(Debug, Args)]

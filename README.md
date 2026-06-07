@@ -29,6 +29,19 @@ filelift upload ./assets --recursive --prefix blog/2026/my-post
 filelift log export --output filelift-debug-log.jsonl
 ```
 
+## Shell Completions
+
+Generate a completion script for your shell:
+
+```powershell
+filelift completions powershell > $HOME\Documents\PowerShell\filelift-completions.ps1
+. $HOME\Documents\PowerShell\filelift-completions.ps1
+```
+
+PowerShell completions include saved target names for commands such as
+`filelift target update <TAB>`, `filelift target use <TAB>`, and
+`filelift upload --target <TAB>`.
+
 ## Target Store
 
 Targets contain non-secret storage metadata:

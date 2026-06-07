@@ -24,6 +24,32 @@ public_base_url = "https://assets.example.com"
     .unwrap();
 }
 
+fn write_target_store_with_target_and_draft(home_dir: &std::path::Path) {
+    let filelift_dir = home_dir.join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        r#"
+default_target = "r2-blog"
+
+[targets.r2-blog]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+
+[draft_targets.draft-cdn]
+provider = "s3"
+bucket = "draft-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://draft.example.com"
+"#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn root_help_lists_target_and_upload_commands() {
     let mut command = Command::cargo_bin("filelift").unwrap();
@@ -38,6 +64,46 @@ fn root_help_lists_target_and_upload_commands() {
         .stdout(predicate::str::contains("Upload a file or directory"))
         .stdout(predicate::str::contains("language"))
         .stdout(predicate::str::contains("Manage CLI language"));
+}
+
+#[test]
+fn root_help_lists_completion_command() {
+    let mut command = Command::cargo_bin("filelift").unwrap();
+
+    command
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("completions"))
+        .stdout(predicate::str::contains("Generate shell completions"));
+}
+
+#[test]
+fn hidden_target_completion_outputs_saved_targets_and_drafts() {
+    let config_dir = tempfile::tempdir().unwrap();
+    write_target_store_with_target_and_draft(config_dir.path());
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args(["__complete", "targets"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("r2-blog\n"))
+        .stdout(predicate::str::contains("draft-cdn\n"));
+}
+
+#[test]
+fn powershell_completions_include_dynamic_target_lookup() {
+    let mut command = Command::cargo_bin("filelift").unwrap();
+
+    command
+        .args(["completions", "powershell"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Register-ArgumentCompleter"))
+        .stdout(predicate::str::contains("filelift __complete targets"));
 }
 
 #[test]

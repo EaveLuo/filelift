@@ -30,9 +30,9 @@ async fn add(command: TargetAddCommand) -> Result<()> {
     );
     let draft = store.draft_targets.get(&name).cloned();
     if draft.is_some() {
-        println!(
+        anstream::println!(
             "{}",
-            i18n::t_args("target-draft-resuming", &[("name", &name)])
+            output::info(&i18n::t_args("target-draft-resuming", &[("name", &name)]))
         );
     }
     let should_prompt_region = draft.is_some()
@@ -92,7 +92,10 @@ async fn add(command: TargetAddCommand) -> Result<()> {
         check_target_connectivity(&target, connectivity_credentials, command.skip_check).await
     {
         save_draft_target(&mut store, &name, target, credentials)?;
-        println!("{}", i18n::t_args("target-draft-saved", &[("name", &name)]));
+        anstream::println!(
+            "{}",
+            output::warning(&i18n::t_args("target-draft-saved", &[("name", &name)]))
+        );
         return Err(error);
     }
 
@@ -109,7 +112,10 @@ async fn add(command: TargetAddCommand) -> Result<()> {
 
     store.save()?;
     diagnostic_log::record_command_result("target add", Some(&name), "success");
-    println!("{}", i18n::t_args("target-added", &[("name", &name)]));
+    anstream::println!(
+        "{}",
+        output::success(&i18n::t_args("target-added", &[("name", &name)]))
+    );
     Ok(())
 }
 
@@ -147,9 +153,9 @@ async fn update(command: TargetUpdateCommand) -> Result<()> {
         .or_else(|| store.draft_targets.get(&name))
         .with_context(|| format!("target `{name}` does not exist"))?;
     if is_draft_resume {
-        println!(
+        anstream::println!(
             "{}",
-            i18n::t_args("target-draft-resuming", &[("name", &name)])
+            output::info(&i18n::t_args("target-draft-resuming", &[("name", &name)]))
         );
     }
 
@@ -221,7 +227,7 @@ async fn update(command: TargetUpdateCommand) -> Result<()> {
     } else {
         i18n::t_args("target-updated", &[("name", &name)])
     };
-    println!("{message}");
+    anstream::println!("{}", output::success(&message));
     Ok(())
 }
 
@@ -262,14 +268,30 @@ async fn check_target_connectivity(
     }
 
     let Some(credentials) = credentials else {
-        println!("{}", i18n::t("target-connectivity-skipped-no-credentials"));
+        anstream::println!(
+            "{}",
+            output::warning(&i18n::t("target-connectivity-skipped-no-credentials"))
+        );
         return Ok(());
     };
 
-    println!("{}", i18n::t("target-checking-connectivity"));
-    let client = storage::s3::Client::new(target.clone(), credentials).await?;
-    client.check_connectivity().await?;
-    println!("{}", i18n::t("target-connectivity-passed"));
+    let progress = output::spinner(i18n::t("target-checking-connectivity"));
+    let client = match storage::s3::Client::new(target.clone(), credentials).await {
+        Ok(client) => client,
+        Err(error) => {
+            progress.finish_and_clear();
+            return Err(error);
+        }
+    };
+    if let Err(error) = client.check_connectivity().await {
+        progress.finish_and_clear();
+        return Err(error);
+    }
+    progress.finish_and_clear();
+    anstream::println!(
+        "{}",
+        output::success(&i18n::t("target-connectivity-passed"))
+    );
     Ok(())
 }
 
@@ -474,9 +496,9 @@ fn use_target(command: TargetUseCommand) -> Result<()> {
     store.default_target = Some(command.name.clone());
     store.save()?;
     diagnostic_log::record_command_result("target use", Some(&command.name), "success");
-    println!(
+    anstream::println!(
         "{}",
-        i18n::t_args("target-using", &[("name", &command.name)])
+        output::success(&i18n::t_args("target-using", &[("name", &command.name)]))
     );
     Ok(())
 }
@@ -495,9 +517,9 @@ fn remove(command: TargetRemoveCommand) -> Result<()> {
     secret::delete_credentials(&command.name)?;
     store.save()?;
     diagnostic_log::record_command_result("target remove", Some(&command.name), "success");
-    println!(
+    anstream::println!(
         "{}",
-        i18n::t_args("target-removed", &[("name", &command.name)])
+        output::success(&i18n::t_args("target-removed", &[("name", &command.name)]))
     );
     Ok(())
 }
