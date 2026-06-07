@@ -1,0 +1,32 @@
+use std::fs;
+
+#[test]
+fn unix_installer_uses_user_bin_and_release_assets() {
+    let script = fs::read_to_string("scripts/install.sh").expect("install.sh should exist");
+
+    assert!(script.contains("REPO=\"EaveLuo/filelift\""));
+    assert!(script.contains("${FILELIFT_INSTALL_DIR:-$HOME/.local/bin}"));
+    assert!(script.contains("x86_64-apple-darwin"));
+    assert!(script.contains("aarch64-apple-darwin"));
+    assert!(script.contains("x86_64-unknown-linux-gnu"));
+    assert!(script.contains("$HOME/.profile"));
+    assert!(script.contains("$HOME/.zshrc"));
+    assert!(script.contains("Installing or updating filelift"));
+    assert!(script.contains("cp -f"));
+    assert!(script.contains("filelift --version"));
+}
+
+#[test]
+fn windows_installer_uses_user_path_and_release_assets() {
+    let script = fs::read_to_string("scripts/install.ps1").expect("install.ps1 should exist");
+
+    assert!(script.contains("$Repo = \"EaveLuo/filelift\""));
+    assert!(script.contains("$env:LOCALAPPDATA"));
+    assert!(script.contains("Programs\\filelift\\bin"));
+    assert!(script.contains("$env:FILELIFT_VERSION"));
+    assert!(script.contains("Installing or updating filelift"));
+    assert!(script.contains("x86_64-pc-windows-msvc"));
+    assert!(script.contains("SetEnvironmentVariable(\"Path\""));
+    assert!(script.contains("User)"));
+    assert!(script.contains("filelift --version"));
+}

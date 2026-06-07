@@ -14,6 +14,37 @@ videos, and other assets should live outside the source repository.
 - Store secrets through the operating system keyring instead of plain text.
 - Print public URLs and Markdown snippets after uploads.
 
+## Install or Update
+
+macOS and Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/EaveLuo/filelift/main/scripts/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/EaveLuo/filelift/main/scripts/install.ps1 | iex
+```
+
+The installer downloads the latest GitHub Release binary, installs it into a
+user-owned directory, and adds that directory to the user PATH. Run the same
+command again later to update filelift in place.
+
+- macOS/Linux default: `~/.local/bin`
+- Windows default: `%LOCALAPPDATA%\Programs\filelift\bin`
+
+To install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/EaveLuo/filelift/main/scripts/install.sh | FILELIFT_VERSION=v0.2.3 sh
+```
+
+```powershell
+$env:FILELIFT_VERSION = "v0.2.3"; irm https://raw.githubusercontent.com/EaveLuo/filelift/main/scripts/install.ps1 | iex
+```
+
 ## Planned CLI
 
 ```bash
