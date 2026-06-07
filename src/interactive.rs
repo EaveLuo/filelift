@@ -1,4 +1,6 @@
 use std::{
+    collections::BTreeMap,
+    env, fs,
     io::{self, IsTerminal, Write},
     process::Command,
     time::{Duration, Instant},
@@ -18,10 +20,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     interactive_completion::{self, CompletionResult, Suggestion},
     output,
-    target::TargetStore,
+    target::{self, TargetStore},
 };
 
 const IDLE_HINT_DELAY: Duration = Duration::from_millis(1200);
+const HISTORY_LIMIT: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputMode {
@@ -54,7 +57,9 @@ pub async fn run() -> Result<()> {
         output::info("filelift interactive mode. Type `exit` to leave.")
     );
 
-    let mut history = Vec::new();
+    let mut history_store = HistoryStore::load().unwrap_or_default();
+    let history_key = HistoryStore::current_key().unwrap_or_else(|_| "global".to_string());
+    let mut history = history_store.entries_for(&history_key);
 
     loop {
         let targets = TargetStore::load()
@@ -63,6 +68,13 @@ pub async fn run() -> Result<()> {
         let Some(line) = read_line(&targets, &mut history)? else {
             break;
         };
+        history_store.replace_entries(&history_key, history.clone());
+        if let Err(error) = history_store.save() {
+            anstream::eprintln!(
+                "{}",
+                output::warning(&format!("failed to save interactive history: {error:#}"))
+            );
+        }
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -212,6 +224,78 @@ fn select_target_name(message: &str, scope: TargetSelectionScope) -> Result<Stri
         .context("failed to select target")
 }
 
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct HistoryStore {
+    #[serde(default)]
+    directories: BTreeMap<String, Vec<String>>,
+}
+
+impl HistoryStore {
+    fn load() -> Result<Self> {
+        let path = history_path()?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read interactive history at {}", path.display()))?;
+        toml::from_str(&content)
+            .with_context(|| format!("failed to parse interactive history at {}", path.display()))
+    }
+
+    fn save(&self) -> Result<()> {
+        let path = history_path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create interactive history directory at {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let content = toml::to_string_pretty(self).context("failed to serialize history")?;
+        fs::write(&path, content)
+            .with_context(|| format!("failed to write interactive history at {}", path.display()))
+    }
+
+    fn current_key() -> Result<String> {
+        env::current_dir()
+            .context("failed to resolve current directory")
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    fn entries_for(&self, key: &str) -> Vec<String> {
+        self.directories.get(key).cloned().unwrap_or_default()
+    }
+
+    fn replace_entries(&mut self, key: &str, entries: Vec<String>) {
+        if entries.is_empty() {
+            self.directories.remove(key);
+        } else {
+            self.directories.insert(key.to_string(), entries);
+        }
+    }
+}
+
+fn history_path() -> Result<std::path::PathBuf> {
+    Ok(target::filelift_home_dir()?.join("history.toml"))
+}
+
+fn record_history_entry(history: &mut Vec<String>, line: &str) {
+    if line.trim().is_empty() {
+        return;
+    }
+    if history.last().is_some_and(|last| last == line) {
+        return;
+    }
+
+    history.push(line.to_string());
+    if history.len() > HISTORY_LIMIT {
+        history.drain(..history.len() - HISTORY_LIMIT);
+    }
+}
+
 fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<String>> {
     let _raw_mode = RawMode::enter()?;
     let mut stdout = io::stdout();
@@ -267,9 +351,7 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                     write!(stdout, "filelift> {}", input)?;
                     writeln!(stdout)?;
                     let line = input.trim();
-                    if !line.is_empty() && history.last().is_none_or(|last| last != line) {
-                        history.push(line.to_string());
-                    }
+                    record_history_entry(history, line);
                     return Ok(Some(input));
                 }
                 KeyEvent {
@@ -1063,6 +1145,39 @@ mod tests {
             KeyCode::Backspace,
             KeyModifiers::NONE
         )));
+    }
+
+    #[test]
+    fn records_distinct_history_entries() {
+        let mut history = Vec::new();
+
+        record_history_entry(&mut history, "target list");
+        record_history_entry(&mut history, "target list");
+        record_history_entry(&mut history, "target use assets");
+
+        assert_eq!(history, vec!["target list", "target use assets"]);
+    }
+
+    #[test]
+    fn does_not_record_empty_history_entries() {
+        let mut history = Vec::new();
+
+        record_history_entry(&mut history, "");
+        record_history_entry(&mut history, "   ");
+
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn trims_history_to_limit() {
+        let mut history = Vec::new();
+
+        for index in 0..(HISTORY_LIMIT + 5) {
+            record_history_entry(&mut history, &format!("target list {index}"));
+        }
+
+        assert_eq!(history.len(), HISTORY_LIMIT);
+        assert_eq!(history.first().unwrap(), "target list 5");
     }
 
     #[test]
