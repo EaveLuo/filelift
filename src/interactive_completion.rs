@@ -85,9 +85,7 @@ pub fn suggestions_for_line(line: &str, targets: &[String]) -> Vec<Suggestion> {
         ["target", subcommand] if !context.ends_with_space => {
             prefixed(target_subcommands(), subcommand)
         }
-        ["target", subcommand, ..] => {
-            target_scoped_suggestions(subcommand, context.current_prefix())
-        }
+        ["target", subcommand, ..] => target_scoped_suggestions(subcommand, &context),
         ["log", subcommand] if !context.ends_with_space => prefixed(log_subcommands(), subcommand),
         ["log", subcommand, ..] => log_scoped_suggestions(subcommand, context.current_prefix()),
         ["language", subcommand] if !context.ends_with_space => {
@@ -143,10 +141,10 @@ fn target_name_suggestions(
     Some(suggestions)
 }
 
-fn target_scoped_suggestions(subcommand: &str, prefix: &str) -> Vec<Suggestion> {
+fn target_scoped_suggestions(subcommand: &str, context: &CompletionContext<'_>) -> Vec<Suggestion> {
     match subcommand {
-        "add" => prefixed(target_add_options(), prefix),
-        "update" => prefixed(target_update_options(), prefix),
+        "add" => unused_options(target_add_options(), context),
+        "update" => unused_options(target_update_options(), context),
         "use" | "remove" | "list" => Vec::new(),
         _ => Vec::new(),
     }
@@ -181,7 +179,15 @@ fn upload_scoped_suggestions(
             .collect();
     }
 
-    prefixed(upload_options(), context.current_prefix())
+    unused_options(upload_options(), context)
+}
+
+fn unused_options(values: Vec<Suggestion>, context: &CompletionContext<'_>) -> Vec<Suggestion> {
+    let used = context.used_options();
+    prefixed(values, context.current_prefix())
+        .into_iter()
+        .filter(|suggestion| !used.iter().any(|option| option == &suggestion.value))
+        .collect()
 }
 
 fn target_value_suggestions(targets: &[String], prefix: &str) -> Vec<Suggestion> {
@@ -321,6 +327,20 @@ impl<'a> CompletionContext<'a> {
             .is_some_and(|word| *word == value)
     }
 
+    fn used_options(&self) -> Vec<String> {
+        let mut options = Vec::new();
+        for word in &self.words {
+            if !word.starts_with("--") {
+                continue;
+            }
+            let option = word.split_once('=').map_or(*word, |(option, _)| option);
+            if !options.iter().any(|existing| existing == option) {
+                options.push(option.to_string());
+            }
+        }
+        options
+    }
+
     fn target_name_prefix(&self) -> Option<&str> {
         let ["target", subcommand, rest @ ..] = self.words.as_slice() else {
             return None;
@@ -428,5 +448,28 @@ mod tests {
             complete("upload ./a.png --target cf", &targets()),
             CompletionResult::Insert("upload ./a.png --target cf-wiki-bucket-apac ".to_string())
         );
+    }
+
+    #[test]
+    fn omits_options_that_are_already_present() {
+        let suggestions = suggestions_for_line(r#"target add --provider="xxxx" --"#, &targets())
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+
+        assert!(!suggestions.contains(&"--provider".to_string()));
+        assert!(suggestions.contains(&"--bucket".to_string()));
+        assert!(suggestions.contains(&"--endpoint".to_string()));
+    }
+
+    #[test]
+    fn omits_upload_options_that_are_already_present() {
+        let suggestions = suggestions_for_line("upload ./a.png --markdown --", &targets())
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+
+        assert!(!suggestions.contains(&"--markdown".to_string()));
+        assert!(suggestions.contains(&"--target".to_string()));
     }
 }
