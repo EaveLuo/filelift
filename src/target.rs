@@ -54,6 +54,22 @@ impl TargetStore {
             .clone()
             .context("no target selected; run `filelift target use <name>` or pass --target")
     }
+
+    pub fn target_names(&self) -> Vec<String> {
+        self.targets.keys().cloned().collect()
+    }
+
+    pub fn target_and_draft_names(&self) -> Vec<String> {
+        let mut names = self.target_names();
+        names.extend(
+            self.draft_targets
+                .keys()
+                .filter(|name| !self.targets.contains_key(*name))
+                .cloned(),
+        );
+        names.sort();
+        names
+    }
 }
 
 pub fn target_store_path() -> Result<Utf8PathBuf> {

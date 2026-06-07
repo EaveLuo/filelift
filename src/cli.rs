@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(name = "filelift", version, about)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -89,7 +89,7 @@ pub struct LanguageUseCommand {
 
 #[derive(Debug, Args)]
 pub struct TargetUpdateCommand {
-    pub name: String,
+    pub name: Option<String>,
     #[arg(long)]
     pub provider: Option<String>,
     #[arg(long)]
@@ -112,12 +112,12 @@ pub struct TargetUpdateCommand {
 
 #[derive(Debug, Args)]
 pub struct TargetUseCommand {
-    pub name: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct TargetRemoveCommand {
-    pub name: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Args)]

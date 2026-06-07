@@ -24,6 +24,32 @@ public_base_url = "https://assets.example.com"
     .unwrap();
 }
 
+fn write_target_store_with_target_and_draft(home_dir: &std::path::Path) {
+    let filelift_dir = home_dir.join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        r#"
+default_target = "r2-blog"
+
+[targets.r2-blog]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+
+[draft_targets.draft-cdn]
+provider = "s3"
+bucket = "draft-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://draft.example.com"
+"#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn root_help_lists_target_and_upload_commands() {
     let mut command = Command::cargo_bin("filelift").unwrap();
@@ -38,6 +64,35 @@ fn root_help_lists_target_and_upload_commands() {
         .stdout(predicate::str::contains("Upload a file or directory"))
         .stdout(predicate::str::contains("language"))
         .stdout(predicate::str::contains("Manage CLI language"));
+}
+
+#[test]
+fn no_args_in_non_interactive_context_returns_actionable_error() {
+    let mut command = Command::cargo_bin("filelift").unwrap();
+
+    command
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "interactive mode requires a terminal",
+        ))
+        .stderr(predicate::str::contains("filelift target list"));
+}
+
+#[test]
+fn missing_target_name_in_non_interactive_context_returns_actionable_error() {
+    let config_dir = tempfile::tempdir().unwrap();
+    write_target_store_with_target_and_draft(config_dir.path());
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args(["target", "use"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target name required"))
+        .stderr(predicate::str::contains("filelift"));
 }
 
 #[test]

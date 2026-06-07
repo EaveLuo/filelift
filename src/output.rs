@@ -1,7 +1,65 @@
 use anyhow::{Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::IsTerminal;
 use url::Url;
 
 use crate::target::UploadTarget;
+
+pub fn success(message: &str) -> String {
+    paint(message, anstyle::AnsiColor::Green)
+}
+
+pub fn warning(message: &str) -> String {
+    paint(message, anstyle::AnsiColor::Yellow)
+}
+
+pub fn error(message: &str) -> String {
+    paint(message, anstyle::AnsiColor::Red)
+}
+
+pub fn info(message: &str) -> String {
+    paint(message, anstyle::AnsiColor::Cyan)
+}
+
+pub fn spinner(message: impl Into<String>) -> ProgressBar {
+    if !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+
+    let progress = ProgressBar::new_spinner();
+    progress.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg}")
+            .expect("valid spinner template")
+            .tick_chars("|/-\\ "),
+    );
+    progress.set_message(message.into());
+    progress.enable_steady_tick(std::time::Duration::from_millis(120));
+    progress
+}
+
+pub fn upload_progress(total: u64) -> ProgressBar {
+    if !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+
+    if total <= 1 {
+        return spinner("Uploading file...");
+    }
+
+    let progress = ProgressBar::new(total);
+    progress.set_style(
+        ProgressStyle::with_template("{bar:28.cyan/blue} {pos}/{len} {msg}")
+            .expect("valid progress template")
+            .progress_chars("=>-"),
+    );
+    progress.set_message("Uploading files...");
+    progress
+}
+
+fn paint(message: &str, color: anstyle::AnsiColor) -> String {
+    let style = anstyle::Style::new().fg_color(Some(color.into()));
+    format!("{style}{message}{style:#}")
+}
 
 pub fn public_url(target: &UploadTarget, key: &str) -> Result<String> {
     let public_base_url = normalize_public_base_url(&target.public_base_url)?;

@@ -51,11 +51,28 @@ pub async fn run(command: UploadCommand) -> Result<()> {
         None
     };
 
+    let progress = if command.dry_run {
+        None
+    } else {
+        Some(output::upload_progress(upload_count))
+    };
+
     for item in items {
         let url = output::public_url(target, &item.key)?;
 
         if let Some(client) = &client {
-            client.upload_file(&item.local_path, &item.key).await?;
+            if let Some(progress) = &progress {
+                progress.set_message(format!("Uploading {}", item.key));
+            }
+            if let Err(error) = client.upload_file(&item.local_path, &item.key).await {
+                if let Some(progress) = &progress {
+                    progress.finish_and_clear();
+                }
+                return Err(error);
+            }
+            if let Some(progress) = &progress {
+                progress.inc(1);
+            }
         }
 
         if command.markdown {
@@ -67,6 +84,14 @@ pub async fn run(command: UploadCommand) -> Result<()> {
         } else {
             println!("{url}");
         }
+    }
+
+    if let Some(progress) = &progress {
+        progress.finish_and_clear();
+        anstream::eprintln!(
+            "{}",
+            output::success(&format!("Uploaded {upload_count} file(s)."))
+        );
     }
 
     tracing::info!(

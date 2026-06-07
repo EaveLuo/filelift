@@ -29,6 +29,25 @@ filelift upload ./assets --recursive --prefix blog/2026/my-post
 filelift log export --output filelift-debug-log.jsonl
 ```
 
+## Interactive Mode
+
+Run `filelift` without a subcommand to open the interactive shell:
+
+```text
+filelift> target update
+```
+
+When a command is missing a target name, filelift shows a dim hint after a short
+pause without interrupting typing. Press `Tab` to choose from configured targets,
+or press `Enter` with the target name still missing to open the selector.
+
+Full commands still run directly and are suitable for scripts:
+
+```powershell
+filelift target use r2-blog
+filelift target update r2-blog --bucket eave-assets --skip-check
+```
+
 ## Target Store
 
 Targets contain non-secret storage metadata:
