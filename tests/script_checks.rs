@@ -30,3 +30,15 @@ fn windows_installer_uses_user_path_and_release_assets() {
     assert!(script.contains("User)"));
     assert!(script.contains("filelift --version"));
 }
+
+#[test]
+fn release_workflow_uploads_installer_assets() {
+    let workflow =
+        fs::read_to_string(".github/workflows/release.yml").expect("release workflow should exist");
+
+    assert!(workflow.contains("filelift-x86_64-pc-windows-msvc.zip"));
+    assert!(workflow.contains("filelift-x86_64-unknown-linux-gnu.tar.gz"));
+    assert!(workflow.contains("filelift-x86_64-apple-darwin.tar.gz"));
+    assert!(workflow.contains("filelift-aarch64-apple-darwin.tar.gz"));
+    assert!(workflow.contains("softprops/action-gh-release"));
+}
