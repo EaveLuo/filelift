@@ -3,6 +3,7 @@ use keyring_core::{Entry, Error, set_default_store};
 
 const SERVICE: &str = "filelift";
 const DIAGNOSTIC_LOG_KEY_ACCOUNT: &str = "diagnostic_log_key";
+const INTERACTIVE_HISTORY_KEY_ACCOUNT: &str = "interactive_history_key";
 
 pub fn set_credentials(
     target_name: &str,
@@ -36,6 +37,14 @@ pub fn diagnostic_log_key() -> Result<String> {
 
 pub fn set_diagnostic_log_key(value: &str) -> Result<()> {
     set_secret(DIAGNOSTIC_LOG_KEY_ACCOUNT, value)
+}
+
+pub fn interactive_history_key() -> Result<String> {
+    get_secret(INTERACTIVE_HISTORY_KEY_ACCOUNT)
+}
+
+pub fn set_interactive_history_key(value: &str) -> Result<()> {
+    set_secret(INTERACTIVE_HISTORY_KEY_ACCOUNT, value)
 }
 
 #[derive(Debug, Clone)]

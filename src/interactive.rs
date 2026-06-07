@@ -7,6 +7,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chacha20poly1305::{
+    ChaCha20Poly1305, KeyInit, Nonce,
+    aead::{Aead, OsRng, rand_core::RngCore},
+};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -19,12 +24,15 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     interactive_completion::{self, CompletionResult, Suggestion},
-    output,
+    output, secret,
     target::{self, TargetStore},
 };
 
 const IDLE_HINT_DELAY: Duration = Duration::from_millis(1200);
 const HISTORY_LIMIT: usize = 200;
+const HISTORY_KEY_ENV: &str = "FILELIFT_HISTORY_KEY_HEX";
+const HISTORY_KEY_LEN: usize = 32;
+const NONCE_LEN: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputMode {
@@ -232,19 +240,43 @@ struct HistoryStore {
 
 impl HistoryStore {
     fn load() -> Result<Self> {
-        let path = history_path()?;
-        if !path.exists() {
-            return Ok(Self::default());
+        let encrypted_path = encrypted_history_path()?;
+        if encrypted_path.exists() {
+            let content = fs::read_to_string(&encrypted_path).with_context(|| {
+                format!(
+                    "failed to read encrypted interactive history at {}",
+                    encrypted_path.display()
+                )
+            })?;
+            return decrypt_history_store(&content).with_context(|| {
+                format!(
+                    "failed to decrypt interactive history at {}",
+                    encrypted_path.display()
+                )
+            });
         }
 
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read interactive history at {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("failed to parse interactive history at {}", path.display()))
+        let legacy_path = legacy_history_path()?;
+        if legacy_path.exists() {
+            let content = fs::read_to_string(&legacy_path).with_context(|| {
+                format!(
+                    "failed to read legacy interactive history at {}",
+                    legacy_path.display()
+                )
+            })?;
+            return toml::from_str(&content).with_context(|| {
+                format!(
+                    "failed to parse legacy interactive history at {}",
+                    legacy_path.display()
+                )
+            });
+        }
+
+        Ok(Self::default())
     }
 
     fn save(&self) -> Result<()> {
-        let path = history_path()?;
+        let path = encrypted_history_path()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!(
@@ -254,9 +286,23 @@ impl HistoryStore {
             })?;
         }
 
-        let content = toml::to_string_pretty(self).context("failed to serialize history")?;
-        fs::write(&path, content)
-            .with_context(|| format!("failed to write interactive history at {}", path.display()))
+        let plaintext = toml::to_string_pretty(self).context("failed to serialize history")?;
+        let content = encrypt_history_store(&plaintext)?;
+        fs::write(&path, content).with_context(|| {
+            format!("failed to write interactive history at {}", path.display())
+        })?;
+
+        let legacy_path = legacy_history_path()?;
+        if legacy_path.exists() {
+            fs::remove_file(&legacy_path).with_context(|| {
+                format!(
+                    "failed to remove legacy plaintext history at {}",
+                    legacy_path.display()
+                )
+            })?;
+        }
+
+        Ok(())
     }
 
     fn current_key() -> Result<String> {
@@ -278,12 +324,19 @@ impl HistoryStore {
     }
 }
 
-fn history_path() -> Result<std::path::PathBuf> {
+fn encrypted_history_path() -> Result<std::path::PathBuf> {
+    Ok(target::filelift_home_dir()?.join("history.toml.enc"))
+}
+
+fn legacy_history_path() -> Result<std::path::PathBuf> {
     Ok(target::filelift_home_dir()?.join("history.toml"))
 }
 
 fn record_history_entry(history: &mut Vec<String>, line: &str) {
     if line.trim().is_empty() {
+        return;
+    }
+    if contains_sensitive_history_input(line) {
         return;
     }
     if history.last().is_some_and(|last| last == line) {
@@ -294,6 +347,110 @@ fn record_history_entry(history: &mut Vec<String>, line: &str) {
     if history.len() > HISTORY_LIMIT {
         history.drain(..history.len() - HISTORY_LIMIT);
     }
+}
+
+fn contains_sensitive_history_input(line: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    [
+        "--access-key-id",
+        "--secret-access-key",
+        "access_key_id",
+        "secret_access_key",
+        "authorization",
+        "password",
+        "token",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
+fn encrypt_history_store(plaintext: &str) -> Result<String> {
+    let key = history_key()?;
+    encrypt_history_store_with_key(plaintext, &key)
+}
+
+fn encrypt_history_store_with_key(plaintext: &str, key: &[u8; HISTORY_KEY_LEN]) -> Result<String> {
+    let cipher = ChaCha20Poly1305::new_from_slice(key).context("invalid history key")?;
+    let mut nonce = [0_u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext.as_bytes())
+        .map_err(|_| anyhow::anyhow!("failed to encrypt interactive history"))?;
+    let encrypted = EncryptedHistory {
+        nonce: STANDARD.encode(nonce),
+        ciphertext: STANDARD.encode(ciphertext),
+    };
+
+    toml::to_string_pretty(&encrypted).context("failed to serialize encrypted history")
+}
+
+fn decrypt_history_store(content: &str) -> Result<HistoryStore> {
+    let key = history_key()?;
+    decrypt_history_store_with_key(content, &key)
+}
+
+fn decrypt_history_store_with_key(
+    content: &str,
+    key: &[u8; HISTORY_KEY_LEN],
+) -> Result<HistoryStore> {
+    let encrypted: EncryptedHistory =
+        toml::from_str(content).context("failed to parse encrypted history")?;
+    let nonce = STANDARD
+        .decode(encrypted.nonce)
+        .context("failed to decode history nonce")?;
+    let ciphertext = STANDARD
+        .decode(encrypted.ciphertext)
+        .context("failed to decode history ciphertext")?;
+    let cipher = ChaCha20Poly1305::new_from_slice(key).context("invalid history key")?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+        .map_err(|_| anyhow::anyhow!("failed to decrypt interactive history"))?;
+    let plaintext =
+        String::from_utf8(plaintext).context("decrypted history contains non-UTF-8 data")?;
+
+    toml::from_str(&plaintext).context("failed to parse decrypted history")
+}
+
+fn history_key() -> Result<[u8; HISTORY_KEY_LEN]> {
+    if let Ok(value) = env::var(HISTORY_KEY_ENV) {
+        return decode_hex_history_key(&value);
+    }
+
+    match secret::interactive_history_key() {
+        Ok(value) => decode_hex_history_key(&value),
+        Err(_) => {
+            let mut key = [0_u8; HISTORY_KEY_LEN];
+            OsRng.fill_bytes(&mut key);
+            let encoded = encode_hex_history_key(&key);
+            secret::set_interactive_history_key(&encoded)?;
+            Ok(key)
+        }
+    }
+}
+
+fn decode_hex_history_key(value: &str) -> Result<[u8; HISTORY_KEY_LEN]> {
+    let value = value.trim();
+    if value.len() != HISTORY_KEY_LEN * 2 {
+        bail!("history key must be 64 hex characters");
+    }
+
+    let mut key = [0_u8; HISTORY_KEY_LEN];
+    for (index, byte) in key.iter_mut().enumerate() {
+        let start = index * 2;
+        *byte = u8::from_str_radix(&value[start..start + 2], 16)
+            .context("history key contains non-hex characters")?;
+    }
+    Ok(key)
+}
+
+fn encode_hex_history_key(bytes: &[u8; HISTORY_KEY_LEN]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct EncryptedHistory {
+    nonce: String,
+    ciphertext: String,
 }
 
 fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<String>> {
@@ -1159,6 +1316,20 @@ mod tests {
     }
 
     #[test]
+    fn skips_sensitive_history_entries() {
+        let mut history = Vec::new();
+
+        record_history_entry(
+            &mut history,
+            "target add r2 --secret-access-key very-secret",
+        );
+        record_history_entry(&mut history, "target update r2 --access-key-id key-id");
+        record_history_entry(&mut history, "target list");
+
+        assert_eq!(history, vec!["target list"]);
+    }
+
+    #[test]
     fn does_not_record_empty_history_entries() {
         let mut history = Vec::new();
 
@@ -1178,6 +1349,27 @@ mod tests {
 
         assert_eq!(history.len(), HISTORY_LIMIT);
         assert_eq!(history.first().unwrap(), "target list 5");
+    }
+
+    #[test]
+    fn encrypts_history_without_plaintext_commands() {
+        let mut store = HistoryStore::default();
+        store.replace_entries(
+            "C:/repo",
+            vec!["target list".to_string(), "upload cover.png".to_string()],
+        );
+        let plaintext = toml::to_string_pretty(&store).unwrap();
+        let key = [7_u8; HISTORY_KEY_LEN];
+
+        let encrypted = encrypt_history_store_with_key(&plaintext, &key).unwrap();
+
+        assert!(!encrypted.contains("target list"));
+        assert!(!encrypted.contains("upload cover.png"));
+        let decrypted = decrypt_history_store_with_key(&encrypted, &key).unwrap();
+        assert_eq!(
+            decrypted.entries_for("C:/repo"),
+            vec!["target list".to_string(), "upload cover.png".to_string()]
+        );
     }
 
     #[test]
