@@ -1,6 +1,6 @@
 [package]
 name = "filelift"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "A small CLI for lifting local files to S3-compatible object storage."
 license = "MIT"
@@ -49,3 +49,6 @@ windows-native-keyring-store = "1.1.0"
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"
+
+[profile.release.package.aws-sdk-s3]
+opt-level = 1
