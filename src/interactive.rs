@@ -274,10 +274,19 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                 }
                 KeyEvent {
                     code: KeyCode::Backspace,
-                    modifiers,
+                    ..
+                }
+                | KeyEvent {
+                    code: KeyCode::Char('h'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                }
+                | KeyEvent {
+                    code: KeyCode::Char('w'),
+                    modifiers: KeyModifiers::CONTROL,
                     ..
                 } => {
-                    if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                    if clears_input_key(key) {
                         clear_input(&mut input, &mut cursor_index);
                     } else {
                         backspace_before_cursor(&mut input, &mut cursor_index);
@@ -758,6 +767,22 @@ fn clear_input(input: &mut String, cursor_index: &mut usize) {
     *cursor_index = 0;
 }
 
+fn clears_input_key(key: KeyEvent) -> bool {
+    match key {
+        KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers,
+            ..
+        } => modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
+        KeyEvent {
+            code: KeyCode::Char('h') | KeyCode::Char('w'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => true,
+        _ => false,
+    }
+}
+
 fn delete_at_cursor(input: &mut String, cursor_index: &mut usize) {
     if *cursor_index >= input.len() {
         return;
@@ -1014,6 +1039,30 @@ mod tests {
 
         assert!(input.is_empty());
         assert_eq!(cursor_index, 0);
+    }
+
+    #[test]
+    fn recognizes_modified_backspace_clear_aliases() {
+        assert!(clears_input_key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::CONTROL
+        )));
+        assert!(clears_input_key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::ALT
+        )));
+        assert!(clears_input_key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(clears_input_key(KeyEvent::new(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!clears_input_key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE
+        )));
     }
 
     #[test]
