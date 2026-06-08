@@ -103,6 +103,7 @@ mod tests {
             endpoint: "https://example.com".to_string(),
             region: "auto".to_string(),
             public_base_url: "https://assets.example.com/base/".to_string(),
+            folder: None,
         };
 
         assert_eq!(
@@ -119,6 +120,7 @@ mod tests {
             endpoint: "https://example.com".to_string(),
             region: "auto".to_string(),
             public_base_url: "img.eaveluo.com".to_string(),
+            folder: None,
         };
 
         assert_eq!(

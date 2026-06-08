@@ -5,6 +5,13 @@ fn with_home_dir(command: &mut Command, home_dir: &std::path::Path) {
     command.env("FILELIFT_HOME", home_dir);
 }
 
+/// Pins the CLI to English so help assertions do not depend on the developer's
+/// global `~/.filelift/language.toml`. `FILELIFT_LANG` takes priority over the
+/// saved language config.
+fn with_english(command: &mut Command) {
+    command.env("FILELIFT_LANG", "en");
+}
+
 fn write_draft_target(home_dir: &std::path::Path, name: &str) {
     let filelift_dir = home_dir.join(".filelift");
     std::fs::create_dir_all(&filelift_dir).unwrap();
@@ -53,6 +60,7 @@ public_base_url = "https://draft.example.com"
 #[test]
 fn root_help_lists_target_and_upload_commands() {
     let mut command = Command::cargo_bin("filelift").unwrap();
+    with_english(&mut command);
 
     command
         .arg("--help")
@@ -120,6 +128,7 @@ fn root_help_uses_saved_chinese_language() {
 #[test]
 fn target_help_lists_target_management_commands() {
     let mut command = Command::cargo_bin("filelift").unwrap();
+    with_english(&mut command);
 
     command
         .args(["target", "--help"])
@@ -145,15 +154,17 @@ fn upload_help_exposes_target_and_batch_options() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--target <TARGET>"))
-        .stdout(predicate::str::contains("--prefix <PREFIX>"))
-        .stdout(predicate::str::contains("--recursive"))
+        .stdout(predicate::str::contains("--folder <FOLDER>"))
+        .stdout(predicate::str::contains("--ignore-target-folder"))
         .stdout(predicate::str::contains("--markdown"))
-        .stdout(predicate::str::contains("--dry-run"));
+        .stdout(predicate::str::contains("--dry-run"))
+        .stdout(predicate::str::contains("--recursive").not());
 }
 
 #[test]
 fn log_help_lists_export_and_clear_commands() {
     let mut command = Command::cargo_bin("filelift").unwrap();
+    with_english(&mut command);
 
     command
         .args(["log", "--help"])
@@ -327,6 +338,8 @@ fn target_add_accepts_all_metadata_as_options() {
             "https://example.r2.cloudflarestorage.com",
             "--public-base-url",
             "https://assets.example.com",
+            "--folder",
+            "blog/images",
             "--access-key-id",
             "test-access-key",
             "--secret-access-key",
@@ -343,6 +356,180 @@ fn target_add_accepts_all_metadata_as_options() {
     assert!(content.contains("endpoint = \"https://example.r2.cloudflarestorage.com\""));
     assert!(content.contains("region = \"auto\""));
     assert!(content.contains("public_base_url = \"https://assets.example.com\""));
+    assert!(content.contains("folder = \"blog/images\""));
+}
+
+#[test]
+fn dry_run_upload_combines_target_folder_and_upload_folder() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let file_path = tempdir.path().join("cover.webp");
+    std::fs::write(&file_path, "image").unwrap();
+
+    let filelift_dir = config_dir.path().join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        r#"
+default_target = "r2-blog"
+
+[targets.r2-blog]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+folder = "blog"
+"#,
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "upload",
+            file_path.to_str().unwrap(),
+            "--folder",
+            "posts/2026/06/08",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "https://assets.example.com/blog/posts/2026/06/08/cover.webp",
+        ));
+}
+
+#[test]
+fn dry_run_previews_local_path_to_key_mapping_on_stderr() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let file_path = tempdir.path().join("cover.webp");
+    std::fs::write(&file_path, "image").unwrap();
+
+    let filelift_dir = config_dir.path().join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        r#"
+default_target = "r2-blog"
+
+[targets.r2-blog]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+folder = "blog"
+"#,
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args(["upload", file_path.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .success()
+        // stdout stays a clean, pipeable URL list.
+        .stdout(predicate::str::contains(
+            "https://assets.example.com/blog/cover.webp",
+        ))
+        // The human-facing preview (path -> key) goes to stderr.
+        .stderr(predicate::str::contains("Dry run:"))
+        .stderr(predicate::str::contains("->"))
+        .stderr(predicate::str::contains("blog/cover.webp"));
+}
+
+#[test]
+fn dry_run_upload_directory_defaults_to_recursive() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let images_dir = tempdir.path().join("images");
+    let nested_dir = images_dir.join("nested");
+    std::fs::create_dir_all(&nested_dir).unwrap();
+    std::fs::write(images_dir.join("cover.webp"), "image").unwrap();
+    std::fs::write(nested_dir.join("demo.mp4"), "video").unwrap();
+
+    let filelift_dir = config_dir.path().join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        r#"
+default_target = "r2-blog"
+
+[targets.r2-blog]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+folder = "blog"
+"#,
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args(["upload", images_dir.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "https://assets.example.com/blog/cover.webp",
+        ))
+        .stdout(predicate::str::contains(
+            "https://assets.example.com/blog/nested/demo.mp4",
+        ));
+}
+
+#[test]
+fn dry_run_upload_ignore_target_folder_skips_base_folder() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let file_path = tempdir.path().join("cover.webp");
+    std::fs::write(&file_path, "image").unwrap();
+
+    let filelift_dir = config_dir.path().join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        r#"
+default_target = "r2-blog"
+
+[targets.r2-blog]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+folder = "blog"
+"#,
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "upload",
+            file_path.to_str().unwrap(),
+            "--folder",
+            "standalone",
+            "--ignore-target-folder",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "https://assets.example.com/standalone/cover.webp",
+        ))
+        .stdout(predicate::str::contains("/blog/").not());
 }
 
 #[test]
@@ -535,7 +722,8 @@ fn target_update_prompts_for_metadata_when_no_fields_are_given() {
              updated-assets\n\
              \n\
              \n\
-             img.eaveluo.com\n",
+             img.eaveluo.com\n\
+             \n",
         )
         .assert()
         .success()
@@ -548,6 +736,7 @@ fn target_update_prompts_for_metadata_when_no_fields_are_given() {
         .stdout(predicate::str::contains(
             "Public base URL [https://assets.example.com]:",
         ))
+        .stdout(predicate::str::contains("Base folder"))
         .stdout(predicate::str::contains("Updated target `r2-blog`."));
 
     let target_store = config_dir.path().join(".filelift").join("targets.toml");
@@ -723,6 +912,25 @@ fn target_add_resumes_failed_connectivity_draft_defaults() {
     assert!(!content.contains("[draft_targets.r2-blog]"));
     assert!(content.contains("region = \"APAC\""));
     assert!(content.contains("public_base_url = \"https://img.eaveluo.com\""));
+}
+
+#[test]
+fn target_remove_deletes_draft_target() {
+    let config_dir = tempfile::tempdir().unwrap();
+    write_draft_target(config_dir.path(), "eavetest1");
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args(["target", "remove", "eavetest1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed target `eavetest1`."));
+
+    let content =
+        std::fs::read_to_string(config_dir.path().join(".filelift").join("targets.toml")).unwrap();
+    assert!(!content.contains("eavetest1"));
 }
 
 #[test]
