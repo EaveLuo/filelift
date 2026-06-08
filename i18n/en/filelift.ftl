@@ -21,6 +21,7 @@ completion-cmd-target = manage upload targets
 completion-cmd-upload = upload files
 completion-cmd-log = manage diagnostic logs
 completion-cmd-language = manage CLI language
+completion-cmd-upgrade = update filelift to the latest release
 completion-cmd-exit = leave interactive mode
 completion-target-add = add a target
 completion-target-update = update a target
@@ -84,3 +85,15 @@ log-exported = Exported diagnostic log to { $path } ({ $count } events). Review 
 log-cleared = Cleared diagnostic logs.
 
 upload-missing-credentials = Missing credentials for target `{ $target }`; run `filelift target update { $target }` to save access keys.
+
+credentials-export-missing = No stored credentials for target `{ $target }`; run `filelift target add { $target }` or set the FILELIFT_* environment variables.
+credentials-export-warning = Exported credentials for `{ $target }` as plaintext environment variables. Handle them carefully and prefer scoped, revocable keys for agents.
+non-interactive-missing-fields = Non-interactive mode requires these options: { $fields }.
+non-interactive-partial-credentials = Provide both the access key id and the secret access key together in non-interactive mode.
+
+update-available = A new filelift release is available: { $current } -> { $latest }. Run `{ $command }` to update.
+upgrade-starting = Updating filelift to the latest release...
+upgrade-succeeded = filelift updated successfully.
+upgrade-failed = The installer exited with an error; filelift was not updated.
+upgrade-spawn-failed = Could not run the installer (`{ $program }`); make sure it is available.
+upgrade-unsupported-os = Automatic upgrade is not supported on this platform ({ $os }); reinstall from the README instructions.

@@ -12,6 +12,45 @@ fn with_english(command: &mut Command) {
     command.env("FILELIFT_LANG", "en");
 }
 
+/// A fixed 64-hex master key so the encrypted secret store is deterministic in
+/// tests and independent of the host machine identifier.
+const TEST_MASTER_KEY: &str = "0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100";
+
+fn with_master_key(command: &mut Command) {
+    command.env("FILELIFT_MASTER_KEY_HEX", TEST_MASTER_KEY);
+}
+
+fn add_target_with_credentials(
+    home_dir: &std::path::Path,
+    name: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+) {
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, home_dir);
+    with_english(&mut command);
+    with_master_key(&mut command);
+    command
+        .args([
+            "target",
+            "add",
+            name,
+            "--bucket",
+            "eave-assets",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--public-base-url",
+            "https://assets.example.com",
+            "--access-key-id",
+            access_key_id,
+            "--secret-access-key",
+            secret_access_key,
+            "--skip-check",
+        ])
+        .assert()
+        .success();
+}
+
 fn write_draft_target(home_dir: &std::path::Path, name: &str) {
     let filelift_dir = home_dir.join(".filelift");
     std::fs::create_dir_all(&filelift_dir).unwrap();
@@ -1038,4 +1077,352 @@ fn log_clear_removes_encrypted_log_file() {
         .stdout(predicate::str::contains("Cleared diagnostic logs."));
 
     assert!(!encrypted_log.exists());
+}
+
+#[test]
+fn credentials_are_stored_in_encrypted_file_not_plaintext() {
+    let home_dir = tempfile::tempdir().unwrap();
+    add_target_with_credentials(
+        home_dir.path(),
+        "r2-blog",
+        "plain-access-id",
+        "plain-secret-key",
+    );
+
+    let secrets = home_dir.path().join(".filelift").join("secrets.enc");
+    assert!(secrets.exists(), "secret store file should be created");
+
+    let bytes = std::fs::read(&secrets).unwrap();
+    let haystack = String::from_utf8_lossy(&bytes);
+    assert!(!haystack.contains("plain-access-id"));
+    assert!(!haystack.contains("plain-secret-key"));
+
+    // No plaintext credentials file should be written.
+    assert!(
+        !home_dir
+            .path()
+            .join(".filelift")
+            .join("credentials.toml")
+            .exists()
+    );
+}
+
+#[test]
+fn credentials_export_emits_per_target_env_vars() {
+    let home_dir = tempfile::tempdir().unwrap();
+    add_target_with_credentials(
+        home_dir.path(),
+        "r2-blog",
+        "test-access-key",
+        "test-secret-key",
+    );
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, home_dir.path());
+    with_english(&mut command);
+    with_master_key(&mut command);
+    command
+        .args(["credentials", "export", "r2-blog"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "FILELIFT_R2_BLOG_ACCESS_KEY_ID=test-access-key",
+        ))
+        .stdout(predicate::str::contains(
+            "FILELIFT_R2_BLOG_SECRET_ACCESS_KEY=test-secret-key",
+        ))
+        // The plaintext warning must go to stderr, keeping stdout machine-clean.
+        .stdout(predicate::str::contains("export ").not())
+        .stderr(predicate::str::contains("plaintext"));
+}
+
+#[test]
+fn credentials_export_shell_format_prefixes_export() {
+    let home_dir = tempfile::tempdir().unwrap();
+    add_target_with_credentials(
+        home_dir.path(),
+        "r2-blog",
+        "test-access-key",
+        "test-secret-key",
+    );
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, home_dir.path());
+    with_english(&mut command);
+    with_master_key(&mut command);
+    command
+        .args(["credentials", "export", "r2-blog", "--format", "shell"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "export FILELIFT_R2_BLOG_ACCESS_KEY_ID=test-access-key",
+        ))
+        .stdout(predicate::str::contains(
+            "export FILELIFT_R2_BLOG_SECRET_ACCESS_KEY=test-secret-key",
+        ));
+}
+
+#[test]
+fn credentials_export_with_wrong_master_key_fails_to_decrypt() {
+    let home_dir = tempfile::tempdir().unwrap();
+    add_target_with_credentials(
+        home_dir.path(),
+        "r2-blog",
+        "test-access-key",
+        "test-secret-key",
+    );
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, home_dir.path());
+    with_english(&mut command);
+    command
+        .env(
+            "FILELIFT_MASTER_KEY_HEX",
+            "00000000000000000000000000000000000000000000000000000000deadbeef",
+        )
+        .args(["credentials", "export", "r2-blog"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("decrypt"));
+}
+
+#[test]
+fn credentials_export_missing_target_is_actionable() {
+    let home_dir = tempfile::tempdir().unwrap();
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, home_dir.path());
+    with_english(&mut command);
+    with_master_key(&mut command);
+    command
+        .args(["credentials", "export", "ghost"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No stored credentials"))
+        .stderr(predicate::str::contains("FILELIFT_"));
+}
+
+#[test]
+fn target_add_reads_secret_access_key_from_stdin() {
+    let home_dir = tempfile::tempdir().unwrap();
+
+    let mut add_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut add_command, home_dir.path());
+    with_english(&mut add_command);
+    with_master_key(&mut add_command);
+    add_command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--bucket",
+            "eave-assets",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--public-base-url",
+            "https://assets.example.com",
+            "--access-key-id",
+            "stdin-access-key",
+            "--secret-access-key-stdin",
+            "--skip-check",
+        ])
+        .write_stdin("stdin-secret-key\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added target `r2-blog`."));
+
+    let mut export_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut export_command, home_dir.path());
+    with_english(&mut export_command);
+    with_master_key(&mut export_command);
+    export_command
+        .args(["credentials", "export", "r2-blog"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "FILELIFT_R2_BLOG_SECRET_ACCESS_KEY=stdin-secret-key",
+        ));
+}
+
+#[test]
+fn target_add_non_interactive_reports_missing_fields() {
+    let home_dir = tempfile::tempdir().unwrap();
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, home_dir.path());
+    with_english(&mut command);
+    with_master_key(&mut command);
+    command
+        .args([
+            "target",
+            "add",
+            "r2-blog",
+            "--non-interactive",
+            "--skip-check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Non-interactive mode requires"))
+        .stderr(predicate::str::contains("--bucket"))
+        .stderr(predicate::str::contains("--secret-access-key"));
+}
+
+#[test]
+fn target_remove_clears_stored_credentials() {
+    let home_dir = tempfile::tempdir().unwrap();
+    add_target_with_credentials(
+        home_dir.path(),
+        "r2-blog",
+        "test-access-key",
+        "test-secret-key",
+    );
+
+    let mut remove_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut remove_command, home_dir.path());
+    with_english(&mut remove_command);
+    with_master_key(&mut remove_command);
+    remove_command
+        .args(["target", "remove", "r2-blog"])
+        .assert()
+        .success();
+
+    let mut export_command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut export_command, home_dir.path());
+    with_english(&mut export_command);
+    with_master_key(&mut export_command);
+    export_command
+        .args(["credentials", "export", "r2-blog"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No stored credentials"));
+}
+
+fn seed_version_cache(home_dir: &std::path::Path, latest_version: &str) {
+    let filelift_dir = home_dir.join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    std::fs::write(
+        filelift_dir.join("version_check.json"),
+        format!(r#"{{"last_checked_ms":{now_ms},"latest_version":"{latest_version}"}}"#),
+    )
+    .unwrap();
+}
+
+#[test]
+fn upgrade_command_is_listed_with_update_alias() {
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_english(&mut command);
+    command
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("upgrade"))
+        .stdout(predicate::str::contains(
+            "Update filelift to the latest release",
+        ));
+
+    // The `update` alias resolves to the same command.
+    let mut alias_help = Command::cargo_bin("filelift").unwrap();
+    with_english(&mut alias_help);
+    alias_help
+        .args(["update", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--version"));
+}
+
+#[test]
+fn update_notice_is_shown_when_a_newer_version_is_cached() {
+    let config_dir = tempfile::tempdir().unwrap();
+    seed_version_cache(config_dir.path(), "999.0.0");
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+    with_english(&mut command);
+    command
+        .args(["target", "list"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("999.0.0"))
+        .stderr(predicate::str::contains("filelift upgrade"));
+}
+
+#[test]
+fn update_notice_is_suppressed_by_opt_out_env() {
+    let config_dir = tempfile::tempdir().unwrap();
+    seed_version_cache(config_dir.path(), "999.0.0");
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+    with_english(&mut command);
+    command
+        .env("FILELIFT_NO_UPDATE_CHECK", "1")
+        .args(["target", "list"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("999.0.0").not());
+}
+
+#[test]
+fn update_notice_is_absent_when_cached_version_is_not_newer() {
+    let config_dir = tempfile::tempdir().unwrap();
+    seed_version_cache(config_dir.path(), "0.0.1");
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+    with_english(&mut command);
+    command
+        .args(["target", "list"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0.0.1").not());
+}
+
+#[test]
+fn upload_dry_run_json_output_lists_uploads() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let file_path = tempdir.path().join("cover.webp");
+    std::fs::write(&file_path, "image").unwrap();
+
+    let filelift_dir = config_dir.path().join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        r#"
+default_target = "r2-blog"
+
+[targets.r2-blog]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+folder = "blog"
+"#,
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+    with_english(&mut command);
+    command
+        .args([
+            "upload",
+            file_path.to_str().unwrap(),
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"uploads\""))
+        .stdout(predicate::str::contains("\"count\": 1"))
+        .stdout(predicate::str::contains("\"dry_run\": true"))
+        .stdout(predicate::str::contains(
+            "https://assets.example.com/blog/cover.webp",
+        ));
 }

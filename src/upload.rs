@@ -9,7 +9,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use indicatif::ProgressBar;
 use tokio::task::JoinSet;
 
-use crate::{cli::UploadCommand, i18n, output, secret, storage, target::TargetStore};
+use crate::{
+    cli::{OutputFormat, UploadCommand},
+    i18n, output, secret, storage,
+    target::TargetStore,
+};
 
 /// Maximum number of files uploaded in parallel for a directory upload.
 const UPLOAD_CONCURRENCY: usize = 8;
@@ -97,16 +101,44 @@ pub async fn run(command: UploadCommand) -> Result<()> {
         }
     }
 
-    for item in &items {
-        let url = output::public_url(target, &item.key)?;
-        if markdown {
-            let label = item
-                .local_path
-                .file_stem()
-                .unwrap_or_else(|| item.local_path.as_str());
-            println!("{}", output::markdown_image(label, &url));
-        } else {
-            println!("{url}");
+    match command.output {
+        OutputFormat::Text => {
+            for item in &items {
+                let url = output::public_url(target, &item.key)?;
+                if markdown {
+                    let label = item
+                        .local_path
+                        .file_stem()
+                        .unwrap_or_else(|| item.local_path.as_str());
+                    println!("{}", output::markdown_image(label, &url));
+                } else {
+                    println!("{url}");
+                }
+            }
+        }
+        OutputFormat::Json => {
+            let entries = items
+                .iter()
+                .map(|item| {
+                    let url = output::public_url(target, &item.key)?;
+                    Ok(serde_json::json!({
+                        "local_path": item.local_path.as_str(),
+                        "key": item.key,
+                        "url": url,
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let document = serde_json::json!({
+                "target": target_name,
+                "dry_run": dry_run,
+                "count": items.len(),
+                "uploads": entries,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&document)
+                    .context("failed to serialize upload result as JSON")?
+            );
         }
     }
 

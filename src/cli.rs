@@ -1,5 +1,5 @@
 use camino::Utf8PathBuf;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "filelift", version, about)]
@@ -15,12 +15,27 @@ pub enum Commands {
     Target(TargetCommands),
     #[command(about = "Upload a file or directory")]
     Upload(UploadCommand),
+    #[command(about = "Materialize stored credentials for injection")]
+    #[command(subcommand)]
+    Credentials(CredentialsCommands),
     #[command(about = "Manage diagnostic logs")]
     #[command(subcommand)]
     Log(LogCommands),
     #[command(about = "Manage CLI language")]
     #[command(subcommand)]
     Language(LanguageCommands),
+    #[command(
+        about = "Update filelift to the latest release",
+        visible_alias = "update"
+    )]
+    Upgrade(UpgradeCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct UpgradeCommand {
+    /// Install a specific version (e.g. `0.3.0` or `v0.3.0`); defaults to latest.
+    #[arg(long)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -35,6 +50,37 @@ pub enum TargetCommands {
     Use(TargetUseCommand),
     #[command(about = "Remove an upload target")]
     Remove(TargetRemoveCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CredentialsCommands {
+    #[command(about = "Print stored credentials as environment variables")]
+    Export(CredentialsExportCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialsExportCommand {
+    /// Target whose credentials to export; defaults to the active target.
+    pub name: Option<String>,
+    /// Output format for the exported variables.
+    #[arg(long, value_enum, default_value_t = ExportFormat::Dotenv)]
+    pub format: ExportFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormat {
+    /// `KEY=value` lines suitable for a `.env` file.
+    Dotenv,
+    /// `export KEY=value` lines suitable for `eval` in a POSIX shell.
+    Shell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-friendly text output.
+    Text,
+    /// Machine-readable JSON output.
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -78,6 +124,12 @@ pub struct TargetAddCommand {
     pub access_key_id: Option<String>,
     #[arg(long)]
     pub secret_access_key: Option<String>,
+    /// Read the secret access key from stdin (one secret per invocation).
+    #[arg(long, conflicts_with = "secret_access_key")]
+    pub secret_access_key_stdin: bool,
+    /// Never prompt; fail fast when a required value is missing.
+    #[arg(long)]
+    pub non_interactive: bool,
     #[arg(long)]
     pub set_default: bool,
     #[arg(long)]
@@ -108,6 +160,12 @@ pub struct TargetUpdateCommand {
     pub access_key_id: Option<String>,
     #[arg(long)]
     pub secret_access_key: Option<String>,
+    /// Read the secret access key from stdin (one secret per invocation).
+    #[arg(long, conflicts_with = "secret_access_key")]
+    pub secret_access_key_stdin: bool,
+    /// Never prompt; fail fast when a required value is missing.
+    #[arg(long)]
+    pub non_interactive: bool,
     #[arg(long)]
     pub set_default: bool,
     #[arg(long)]
@@ -139,4 +197,7 @@ pub struct UploadCommand {
     pub markdown: bool,
     #[arg(long)]
     pub dry_run: bool,
+    /// Output format for the resulting URLs.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output: OutputFormat,
 }

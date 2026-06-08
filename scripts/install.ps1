@@ -91,7 +91,30 @@ try {
 
     $InstalledPath = Join-Path $InstallDir "filelift.exe"
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item -Path $Binary.FullName -Destination $InstalledPath -Force
+
+    # Windows locks a running .exe against overwrite but still allows renaming it.
+    # When `filelift upgrade` updates the binary that is currently running, the
+    # plain Copy-Item fails, so fall back to moving the running binary aside and
+    # writing the new one in its place. The leftover .old file is removed on the
+    # next install once the previous process has exited.
+    $BackupPath = "$InstalledPath.old"
+    if (Test-Path $BackupPath) {
+        Remove-Item -Path $BackupPath -Force -ErrorAction SilentlyContinue
+    }
+
+    try {
+        Copy-Item -Path $Binary.FullName -Destination $InstalledPath -Force -ErrorAction Stop
+    }
+    catch {
+        if (Test-Path $InstalledPath) {
+            Move-Item -Path $InstalledPath -Destination $BackupPath -Force
+            Copy-Item -Path $Binary.FullName -Destination $InstalledPath -Force
+        }
+        else {
+            throw
+        }
+    }
+
     Add-UserPath -PathToAdd $InstallDir
 
     Write-Host "Installed to $InstalledPath"

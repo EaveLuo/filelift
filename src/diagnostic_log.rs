@@ -23,6 +23,10 @@ const LOG_KEY_ENV: &str = "FILELIFT_LOG_KEY_HEX";
 const LOG_KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 
+/// Caches the resolved diagnostic-log key for the process so the encrypted
+/// secret store is not decrypted on every log event.
+static LOG_KEY_CACHE: std::sync::OnceLock<[u8; LOG_KEY_LEN]> = std::sync::OnceLock::new();
+
 pub fn init() {
     let layer = DiagnosticLogLayer::default();
     let subscriber = tracing_subscriber::registry().with(layer);
@@ -157,6 +161,18 @@ fn append_event(event: Value) -> Result<()> {
 }
 
 fn log_key() -> Result<[u8; LOG_KEY_LEN]> {
+    if let Some(key) = LOG_KEY_CACHE.get() {
+        return Ok(*key);
+    }
+
+    let key = resolve_log_key()?;
+    let _ = LOG_KEY_CACHE.set(key);
+    Ok(key)
+}
+
+/// Resolves the diagnostic-log key from the env override, then the secret store,
+/// generating and persisting a fresh key when none exists yet.
+fn resolve_log_key() -> Result<[u8; LOG_KEY_LEN]> {
     if let Ok(value) = env::var(LOG_KEY_ENV) {
         return decode_hex_key(&value);
     }

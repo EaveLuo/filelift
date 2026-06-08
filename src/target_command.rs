@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 use anyhow::{Context, Result};
 
@@ -10,6 +10,22 @@ use crate::{
     diagnostic_log, i18n, interactive, output, secret, storage,
     target::{TargetStore, UploadTarget},
 };
+
+/// Reads the secret access key from stdin when `--secret-access-key-stdin` is
+/// set, otherwise returns the provided flag value untouched.
+fn resolve_secret_input(value: Option<String>, from_stdin: bool) -> Result<Option<String>> {
+    if !from_stdin {
+        return Ok(value);
+    }
+
+    let mut buffer = String::new();
+    io::stdin()
+        .read_to_string(&mut buffer)
+        .context("failed to read secret access key from stdin")?;
+    let secret = buffer.trim().to_string();
+    anyhow::ensure!(!secret.is_empty(), "no secret access key received on stdin");
+    Ok(Some(secret))
+}
 
 pub async fn run(command: TargetCommands) -> Result<()> {
     match command {
@@ -23,11 +39,18 @@ pub async fn run(command: TargetCommands) -> Result<()> {
 
 async fn add(command: TargetAddCommand) -> Result<()> {
     let mut store = TargetStore::load()?;
-    let name = command.name;
+    let name = command.name.clone();
     anyhow::ensure!(
         !store.targets.contains_key(&name),
         "target `{name}` already exists; use `filelift target update {name}` to change it"
     );
+    let secret_access_key = resolve_secret_input(
+        command.secret_access_key.clone(),
+        command.secret_access_key_stdin,
+    )?;
+    if command.non_interactive {
+        ensure_non_interactive_add(&command, secret_access_key.is_some())?;
+    }
     let draft = store.draft_targets.get(&name).cloned();
     if draft.is_some() {
         anstream::println!(
@@ -78,10 +101,11 @@ async fn add(command: TargetAddCommand) -> Result<()> {
     let saved_draft_credentials = draft.as_ref().and_then(|_| secret::credentials(&name).ok());
     let credentials = prompt_credentials(
         command.access_key_id,
-        command.secret_access_key,
+        secret_access_key,
         CredentialPromptMode::RequireOrReuseSaved {
             saved_credentials: saved_draft_credentials,
         },
+        command.non_interactive,
     )?;
     let target = UploadTarget {
         provider: command.provider,
@@ -159,9 +183,43 @@ fn save_draft_target(
     Ok(())
 }
 
+fn ensure_non_interactive_add(command: &TargetAddCommand, has_secret: bool) -> Result<()> {
+    let mut missing = Vec::new();
+    if command.bucket.is_none() {
+        missing.push("--bucket");
+    }
+    if command.endpoint.is_none() {
+        missing.push("--endpoint");
+    }
+    if command.public_base_url.is_none() {
+        missing.push("--public-base-url");
+    }
+    if command.access_key_id.is_none() {
+        missing.push("--access-key-id");
+    }
+    if !has_secret {
+        missing.push("--secret-access-key (or --secret-access-key-stdin)");
+    }
+
+    anyhow::ensure!(
+        missing.is_empty(),
+        "{}",
+        i18n::t_args(
+            "non-interactive-missing-fields",
+            &[("fields", &missing.join(", "))]
+        )
+    );
+    Ok(())
+}
+
 async fn update(command: TargetUpdateCommand) -> Result<()> {
     let mut store = TargetStore::load()?;
-    let should_prompt_metadata = should_prompt_update_metadata(&command);
+    let secret_access_key = resolve_secret_input(
+        command.secret_access_key.clone(),
+        command.secret_access_key_stdin,
+    )?;
+    let should_prompt_metadata =
+        !command.non_interactive && should_prompt_update_metadata(&command);
     let name = interactive::resolve_target_name(
         command.name,
         interactive::TargetSelectionRequest::Update,
@@ -219,10 +277,11 @@ async fn update(command: TargetUpdateCommand) -> Result<()> {
     )?;
     let credentials = prompt_credentials(
         command.access_key_id,
-        command.secret_access_key,
+        secret_access_key,
         CredentialPromptMode::PromptWhenMissingSaved {
             has_saved_credentials: secret::credentials(&name).is_ok(),
         },
+        command.non_interactive,
     )?;
     let connectivity_credentials =
         resolve_connectivity_credentials(credentials.clone(), || secret::credentials(&name))?;
@@ -268,6 +327,7 @@ fn should_prompt_update_metadata(command: &TargetUpdateCommand) -> bool {
         && command.folder.is_none()
         && command.access_key_id.is_none()
         && command.secret_access_key.is_none()
+        && !command.secret_access_key_stdin
 }
 
 fn resolve_update_field(
@@ -429,6 +489,7 @@ fn prompt_credentials(
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
     mode: CredentialPromptMode,
+    non_interactive: bool,
 ) -> Result<Option<(String, String)>> {
     if let CredentialPromptMode::RequireOrReuseSaved {
         saved_credentials: Some(saved_credentials),
@@ -436,6 +497,7 @@ fn prompt_credentials(
     {
         let access_key_id = match access_key_id {
             Some(access_key_id) => access_key_id,
+            None if non_interactive => saved_credentials.access_key_id.clone(),
             None => prompt_existing_default(
                 &i18n::t("prompt-access-key-id"),
                 &saved_credentials.access_key_id,
@@ -443,6 +505,7 @@ fn prompt_credentials(
         };
         let secret_access_key = match secret_access_key {
             Some(secret_access_key) => secret_access_key,
+            None if non_interactive => saved_credentials.secret_access_key.clone(),
             None => prompt_password_with_default(
                 &i18n::t("prompt-secret-access-key"),
                 &saved_credentials.secret_access_key,
@@ -455,6 +518,9 @@ fn prompt_credentials(
         (Some(access_key_id), Some(secret_access_key)) => {
             Ok(Some((access_key_id, secret_access_key)))
         }
+        (Some(_), None) | (None, Some(_)) if non_interactive => {
+            anyhow::bail!(i18n::t("non-interactive-partial-credentials"))
+        }
         (Some(access_key_id), None) => Ok(Some((
             access_key_id,
             prompt_password(&i18n::t("prompt-secret-access-key"))?,
@@ -463,6 +529,7 @@ fn prompt_credentials(
             prompt_required(None, &i18n::t("prompt-access-key-id"))?,
             secret_access_key,
         ))),
+        (None, None) if non_interactive => Ok(None),
         (None, None) if mode.should_prompt_for_missing_credentials() => Ok(Some((
             prompt_required(None, &i18n::t("prompt-access-key-id"))?,
             prompt_password(&i18n::t("prompt-secret-access-key"))?,
