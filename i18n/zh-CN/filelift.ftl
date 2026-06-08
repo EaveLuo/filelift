@@ -97,3 +97,5 @@ upgrade-succeeded = filelift 更新成功。
 upgrade-failed = 安装脚本执行出错，filelift 未更新。
 upgrade-spawn-failed = 无法运行安装脚本（`{ $program }`），请确认它可用。
 upgrade-unsupported-os = 当前平台（{ $os }）不支持自动更新，请按 README 说明重新安装。
+upgrade-via-cargo = 检测到通过 cargo 安装，正在使用 `cargo install` 升级……
+upgrade-cargo-manual = filelift 是用 cargo 安装的。请在新终端中运行 `{ $command }` 进行升级（Windows 下正在运行的二进制无法自我替换）。

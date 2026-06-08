@@ -144,8 +144,27 @@ add_path_to_profile "$HOME/.profile"
 add_path_to_profile "$HOME/.zshrc"
 
 say "Installed to $INSTALL_DIR/$BINARY_NAME"
+
+# Warn if another filelift earlier on PATH (for example a `cargo install` copy in
+# ~/.cargo/bin) will shadow the binary we just installed, so the user is not
+# surprised by an unchanged version.
+RESOLVED="$(command -v filelift 2>/dev/null || true)"
+if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$INSTALL_DIR/$BINARY_NAME" ]; then
+  say "Warning: another filelift is earlier on your PATH and will be used instead of this install:" >&2
+  say "  in use:    $RESOLVED" >&2
+  say "  installed: $INSTALL_DIR/$BINARY_NAME" >&2
+  case "$RESOLVED" in
+    *"/.cargo/bin/"*)
+      say "  That copy was installed with cargo. Upgrade it with: cargo install filelift --force" >&2
+      ;;
+    *)
+      say "  Remove it or reorder your PATH so $INSTALL_DIR comes first." >&2
+      ;;
+  esac
+fi
+
 if path_contains; then
-  filelift --version
+  "$INSTALL_DIR/$BINARY_NAME" --version
 else
   say "Added $INSTALL_DIR to your shell profile. Open a new terminal, then run:"
   say "  filelift --version"

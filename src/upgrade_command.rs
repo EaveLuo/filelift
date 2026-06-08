@@ -4,6 +4,7 @@
 //! PATH handling, this delegates to the official install scripts so there is a
 //! single source of truth for how filelift is installed and updated.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -25,9 +26,15 @@ pub struct UpgradePlan {
 }
 
 pub fn run(command: UpgradeCommand) -> Result<()> {
-    let plan = build_plan(std::env::consts::OS, command.version)?;
-
     anstream::eprintln!("{}", output::info(&i18n::t("upgrade-starting")));
+
+    // Upgrade through the same channel the running binary came from, so we never
+    // install a second copy that the existing one would shadow on PATH.
+    if running_from_cargo_bin() {
+        return run_cargo_upgrade(std::env::consts::OS, command.version);
+    }
+
+    let plan = build_plan(std::env::consts::OS, command.version)?;
 
     let mut process = Command::new(&plan.program);
     process.args(&plan.args);
@@ -38,6 +45,74 @@ pub fn run(command: UpgradeCommand) -> Result<()> {
     let status = process
         .status()
         .with_context(|| i18n::t_args("upgrade-spawn-failed", &[("program", &plan.program)]))?;
+
+    anyhow::ensure!(status.success(), i18n::t("upgrade-failed"));
+
+    diagnostic_log::record_command_result("upgrade", None, "success");
+    anstream::eprintln!("{}", output::success(&i18n::t("upgrade-succeeded")));
+    Ok(())
+}
+
+/// Reports whether the running executable lives in Cargo's bin directory, which
+/// indicates it was installed with `cargo install`.
+fn running_from_cargo_bin() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    cargo_bin_dir()
+        .map(|dir| is_within(&exe, &dir))
+        .unwrap_or(false)
+}
+
+/// Resolves `$CARGO_HOME/bin`, falling back to `~/.cargo/bin`.
+fn cargo_bin_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CARGO_HOME") {
+        return Some(PathBuf::from(home).join("bin"));
+    }
+    dirs::home_dir().map(|home| home.join(".cargo").join("bin"))
+}
+
+fn is_within(path: &Path, dir: &Path) -> bool {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    path.starts_with(&dir)
+}
+
+/// Upgrades a cargo-managed install via `cargo install`.
+///
+/// On Windows the running `.exe` is locked, so cargo cannot replace the very
+/// binary that launched the upgrade; we print the exact command instead of
+/// failing midway. On other platforms the running binary can be replaced in
+/// place, so we run cargo directly for a true one-step upgrade.
+fn run_cargo_upgrade(target_os: &str, version: Option<String>) -> Result<()> {
+    let version = version.map(|version| version.trim().trim_start_matches('v').to_string());
+
+    if target_os == "windows" {
+        let mut command = "cargo install filelift --force".to_string();
+        if let Some(version) = &version {
+            command.push_str(&format!(" --version {version}"));
+        }
+        anstream::eprintln!(
+            "{}",
+            output::warning(&i18n::t_args(
+                "upgrade-cargo-manual",
+                &[("command", &command)]
+            ))
+        );
+        return Ok(());
+    }
+
+    anstream::eprintln!("{}", output::info(&i18n::t("upgrade-via-cargo")));
+
+    let mut process = Command::new("cargo");
+    process.arg("install").arg("filelift").arg("--force");
+    if let Some(version) = &version {
+        process.arg("--version").arg(version);
+    }
+
+    let status = process
+        .status()
+        .with_context(|| i18n::t_args("upgrade-spawn-failed", &[("program", "cargo")]))?;
 
     anyhow::ensure!(status.success(), i18n::t("upgrade-failed"));
 
@@ -107,5 +182,13 @@ mod tests {
     #[test]
     fn unsupported_os_is_rejected() {
         assert!(build_plan("freebsd", None).is_err());
+    }
+
+    #[test]
+    fn cargo_upgrade_on_windows_only_prints_guidance() {
+        // On Windows the running exe is locked, so this must not attempt to run
+        // cargo; it returns Ok after printing the manual command.
+        assert!(run_cargo_upgrade("windows", Some("v1.2.3".to_string())).is_ok());
+        assert!(run_cargo_upgrade("windows", None).is_ok());
     }
 }
