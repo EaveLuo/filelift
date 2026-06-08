@@ -275,6 +275,7 @@ fn target_add_options() -> Vec<Suggestion> {
         Suggestion::option("--endpoint", "S3-compatible endpoint"),
         Suggestion::option("--region", "storage region"),
         Suggestion::option("--public-base-url", "public file URL base"),
+        Suggestion::option("--folder", "object key folder"),
         Suggestion::option("--access-key-id", "access key id"),
         Suggestion::option("--secret-access-key", "secret access key"),
         Suggestion::option("--set-default", "make this target default"),
@@ -289,7 +290,7 @@ fn target_update_options() -> Vec<Suggestion> {
 fn upload_options() -> Vec<Suggestion> {
     vec![
         Suggestion::option("--target", "target name"),
-        Suggestion::option("--prefix", "object key prefix"),
+        Suggestion::option("--folder", "object key folder"),
         Suggestion::option("--name", "object key name"),
         Suggestion::option("--recursive", "upload a directory recursively"),
         Suggestion::option("--markdown", "print markdown image links"),

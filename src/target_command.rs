@@ -70,6 +70,11 @@ async fn add(command: TargetAddCommand) -> Result<()> {
         draft.as_ref().map(|target| target.public_base_url.as_str()),
     )?;
     let public_base_url = output::normalize_public_base_url(&public_base_url)?;
+    let folder = resolve_add_optional_field(
+        command.folder,
+        &i18n::t("prompt-folder"),
+        draft.as_ref().and_then(|target| target.folder.as_deref()),
+    )?;
     let saved_draft_credentials = draft.as_ref().and_then(|_| secret::credentials(&name).ok());
     let credentials = prompt_credentials(
         command.access_key_id,
@@ -84,6 +89,7 @@ async fn add(command: TargetAddCommand) -> Result<()> {
         endpoint,
         region,
         public_base_url,
+        folder,
     };
     let connectivity_credentials =
         resolve_connectivity_credentials(credentials.clone(), || secret::credentials(&name))?;
@@ -124,6 +130,18 @@ fn resolve_add_field(value: Option<String>, label: &str, draft: Option<&str>) ->
         (Some(value), _) => Ok(value),
         (None, Some(draft)) => prompt_existing_default(label, draft),
         (None, None) => prompt_required(None, label),
+    }
+}
+
+fn resolve_add_optional_field(
+    value: Option<String>,
+    label: &str,
+    draft: Option<&str>,
+) -> Result<Option<String>> {
+    match (value, draft) {
+        (Some(value), _) => normalize_config_folder(value),
+        (None, Some(draft)) => normalize_config_folder(prompt_existing_default(label, draft)?),
+        (None, None) => Ok(None),
     }
 }
 
@@ -193,6 +211,12 @@ async fn update(command: TargetUpdateCommand) -> Result<()> {
         should_prompt_metadata,
     )?;
     let public_base_url = output::normalize_public_base_url(&public_base_url)?;
+    let folder = resolve_update_optional_field(
+        command.folder,
+        &i18n::t("prompt-folder"),
+        existing.folder.as_deref(),
+        should_prompt_metadata,
+    )?;
     let credentials = prompt_credentials(
         command.access_key_id,
         command.secret_access_key,
@@ -208,6 +232,7 @@ async fn update(command: TargetUpdateCommand) -> Result<()> {
         endpoint,
         region,
         public_base_url,
+        folder,
     };
 
     check_target_connectivity(&target, connectivity_credentials, command.skip_check).await?;
@@ -240,6 +265,7 @@ fn should_prompt_update_metadata(command: &TargetUpdateCommand) -> bool {
         && command.endpoint.is_none()
         && command.region.is_none()
         && command.public_base_url.is_none()
+        && command.folder.is_none()
         && command.access_key_id.is_none()
         && command.secret_access_key.is_none()
 }
@@ -259,6 +285,44 @@ fn resolve_update_field(
     }
 
     Ok(current.to_string())
+}
+
+fn resolve_update_optional_field(
+    value: Option<String>,
+    label: &str,
+    current: Option<&str>,
+    should_prompt: bool,
+) -> Result<Option<String>> {
+    if let Some(value) = value {
+        return normalize_config_folder(value);
+    }
+
+    if should_prompt {
+        let answer = prompt_existing_default(label, current.unwrap_or(""))?;
+        return normalize_config_folder(answer);
+    }
+
+    Ok(current.map(ToString::to_string))
+}
+
+fn normalize_config_folder(value: String) -> Result<Option<String>> {
+    let value = value.trim().replace('\\', "/");
+    let normalized = value
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    anyhow::ensure!(
+        !normalized.split('/').any(|segment| segment == ".."),
+        "folder cannot contain `..` path segments"
+    );
+
+    if normalized.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(normalized))
+    }
 }
 
 async fn check_target_connectivity(

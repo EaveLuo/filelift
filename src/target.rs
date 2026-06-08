@@ -20,6 +20,9 @@ pub struct UploadTarget {
     pub endpoint: String,
     pub region: String,
     pub public_base_url: String,
+    /// User-facing folder. S3-compatible APIs use this as an object key prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 impl TargetStore {

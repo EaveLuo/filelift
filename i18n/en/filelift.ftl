@@ -18,6 +18,7 @@ prompt-provider = Provider
 prompt-endpoint = Endpoint
 prompt-region = Region
 prompt-public-base-url = Public base URL
+prompt-folder = Folder
 prompt-access-key-id = Access key ID
 prompt-secret-access-key = Secret access key
 prompt-save-access-keys-now = Save access keys now? [Y/n]: 

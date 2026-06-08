@@ -18,6 +18,7 @@ prompt-provider = 提供商
 prompt-endpoint = 端点
 prompt-region = 区域
 prompt-public-base-url = 公开访问基础 URL
+prompt-folder = 文件夹
 prompt-access-key-id = Access key ID
 prompt-secret-access-key = Secret access key
 prompt-save-access-keys-now = 现在保存访问密钥吗？[Y/n]: 

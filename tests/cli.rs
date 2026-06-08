@@ -145,7 +145,7 @@ fn upload_help_exposes_target_and_batch_options() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--target <TARGET>"))
-        .stdout(predicate::str::contains("--prefix <PREFIX>"))
+        .stdout(predicate::str::contains("--folder <FOLDER>"))
         .stdout(predicate::str::contains("--recursive"))
         .stdout(predicate::str::contains("--markdown"))
         .stdout(predicate::str::contains("--dry-run"));
@@ -327,6 +327,8 @@ fn target_add_accepts_all_metadata_as_options() {
             "https://example.r2.cloudflarestorage.com",
             "--public-base-url",
             "https://assets.example.com",
+            "--folder",
+            "blog/images",
             "--access-key-id",
             "test-access-key",
             "--secret-access-key",
@@ -343,6 +345,50 @@ fn target_add_accepts_all_metadata_as_options() {
     assert!(content.contains("endpoint = \"https://example.r2.cloudflarestorage.com\""));
     assert!(content.contains("region = \"auto\""));
     assert!(content.contains("public_base_url = \"https://assets.example.com\""));
+    assert!(content.contains("folder = \"blog/images\""));
+}
+
+#[test]
+fn dry_run_upload_combines_target_folder_and_upload_folder() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let file_path = tempdir.path().join("cover.webp");
+    std::fs::write(&file_path, "image").unwrap();
+
+    let filelift_dir = config_dir.path().join(".filelift");
+    std::fs::create_dir_all(&filelift_dir).unwrap();
+    std::fs::write(
+        filelift_dir.join("targets.toml"),
+        r#"
+default_target = "r2-blog"
+
+[targets.r2-blog]
+provider = "s3"
+bucket = "eave-assets"
+endpoint = "https://example.r2.cloudflarestorage.com"
+region = "auto"
+public_base_url = "https://assets.example.com"
+folder = "blog"
+"#,
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("filelift").unwrap();
+    with_home_dir(&mut command, config_dir.path());
+
+    command
+        .args([
+            "upload",
+            file_path.to_str().unwrap(),
+            "--folder",
+            "posts/2026/06/08",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "https://assets.example.com/blog/posts/2026/06/08/cover.webp",
+        ));
 }
 
 #[test]
@@ -535,7 +581,8 @@ fn target_update_prompts_for_metadata_when_no_fields_are_given() {
              updated-assets\n\
              \n\
              \n\
-             img.eaveluo.com\n",
+             img.eaveluo.com\n\
+             \n",
         )
         .assert()
         .success()
@@ -548,6 +595,7 @@ fn target_update_prompts_for_metadata_when_no_fields_are_given() {
         .stdout(predicate::str::contains(
             "Public base URL [https://assets.example.com]:",
         ))
+        .stdout(predicate::str::contains("Folder []:"))
         .stdout(predicate::str::contains("Updated target `r2-blog`."));
 
     let target_store = config_dir.path().join(".filelift").join("targets.toml");

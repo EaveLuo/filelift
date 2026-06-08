@@ -1,4 +1,7 @@
-use std::fs;
+use std::{
+    fs,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -16,9 +19,10 @@ pub async fn run(command: UploadCommand) -> Result<()> {
         .get(&target_name)
         .with_context(|| format!("target `{target_name}` does not exist"))?;
 
+    let folder = resolve_upload_folder(target.folder.as_deref(), command.folder.as_deref())?;
     let items = plan_uploads(
         &command.path,
-        command.prefix.as_deref(),
+        folder.as_deref(),
         command.name.as_deref(),
         command.recursive,
     )?;
@@ -186,6 +190,91 @@ fn join_key(prefix: Option<&str>, name: &str) -> String {
     }
 }
 
+fn resolve_upload_folder(
+    target_folder: Option<&str>,
+    upload_folder: Option<&str>,
+) -> Result<Option<String>> {
+    let now = DateParts::today_utc();
+    let mut parts = Vec::new();
+    if let Some(folder) = normalize_folder(target_folder, now)? {
+        parts.push(folder);
+    }
+    if let Some(folder) = normalize_folder(upload_folder, now)? {
+        parts.push(folder);
+    }
+
+    if parts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(parts.join("/")))
+    }
+}
+
+fn normalize_folder(folder: Option<&str>, today: DateParts) -> Result<Option<String>> {
+    let Some(folder) = folder.map(str::trim).filter(|folder| !folder.is_empty()) else {
+        return Ok(None);
+    };
+    let rendered = render_folder_template(folder, today);
+    let rendered = rendered.replace('\\', "/");
+    let normalized = rendered
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    if normalized.contains(&"..") {
+        bail!("folder cannot contain `..` path segments");
+    }
+
+    Ok(Some(normalized.join("/")))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DateParts {
+    year: i32,
+    month: u32,
+    day: u32,
+}
+
+impl DateParts {
+    fn today_utc() -> Self {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self::from_unix_days((seconds / 86_400) as i64)
+    }
+
+    fn from_unix_days(days: i64) -> Self {
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let mut year = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = mp + if mp < 10 { 3 } else { -9 };
+        year += if month <= 2 { 1 } else { 0 };
+
+        Self {
+            year: year as i32,
+            month: month as u32,
+            day: day as u32,
+        }
+    }
+}
+
+fn render_folder_template(template: &str, today: DateParts) -> String {
+    template
+        .replace("{yyyy}", &format!("{:04}", today.year))
+        .replace("{MM}", &format!("{:02}", today.month))
+        .replace("{dd}", &format!("{:02}", today.day))
+        .replace(
+            "{date}",
+            &format!("{:04}-{:02}-{:02}", today.year, today.month, today.day),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +305,43 @@ mod tests {
                 key: "blog/post/cover.webp".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn combines_target_folder_and_upload_folder() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let file_path = tempdir.path().join("cover.webp");
+        fs::write(&file_path, "image").unwrap();
+        let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
+
+        let folder = resolve_upload_folder(Some("blog"), Some("posts/2026/06/08")).unwrap();
+        let items = plan_uploads(&file_path, folder.as_deref(), None, false).unwrap();
+
+        assert_eq!(items[0].key, "blog/posts/2026/06/08/cover.webp");
+    }
+
+    #[test]
+    fn rejects_parent_directory_segments_in_folder() {
+        let error = resolve_upload_folder(Some("blog"), Some("../private"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("folder"));
+        assert!(error.contains(".."));
+    }
+
+    #[test]
+    fn renders_basic_date_folder_template() {
+        let folder = render_folder_template(
+            "posts/{yyyy}/{MM}/{dd}/{date}",
+            DateParts {
+                year: 2026,
+                month: 6,
+                day: 8,
+            },
+        );
+
+        assert_eq!(folder, "posts/2026/06/08/2026-06-08");
     }
 
     #[test]

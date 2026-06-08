@@ -73,6 +73,8 @@ pub struct TargetAddCommand {
     #[arg(long)]
     pub public_base_url: Option<String>,
     #[arg(long)]
+    pub folder: Option<String>,
+    #[arg(long)]
     pub access_key_id: Option<String>,
     #[arg(long)]
     pub secret_access_key: Option<String>,
@@ -101,6 +103,8 @@ pub struct TargetUpdateCommand {
     #[arg(long)]
     pub public_base_url: Option<String>,
     #[arg(long)]
+    pub folder: Option<String>,
+    #[arg(long)]
     pub access_key_id: Option<String>,
     #[arg(long)]
     pub secret_access_key: Option<String>,
@@ -125,8 +129,8 @@ pub struct UploadCommand {
     pub path: Utf8PathBuf,
     #[arg(long)]
     pub target: Option<String>,
-    #[arg(long)]
-    pub prefix: Option<String>,
+    #[arg(long, alias = "prefix")]
+    pub folder: Option<String>,
     #[arg(long)]
     pub name: Option<String>,
     #[arg(long)]
