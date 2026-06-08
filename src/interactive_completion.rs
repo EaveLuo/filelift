@@ -391,6 +391,7 @@ fn root_commands() -> Vec<Suggestion> {
         Suggestion::command("upload", "completion-cmd-upload"),
         Suggestion::command("log", "completion-cmd-log"),
         Suggestion::command("language", "completion-cmd-language"),
+        Suggestion::command("upgrade", "completion-cmd-upgrade"),
         Suggestion::command("exit", "completion-cmd-exit"),
         Suggestion::command("quit", "completion-cmd-exit"),
     ]

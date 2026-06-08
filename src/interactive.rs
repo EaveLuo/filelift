@@ -968,6 +968,9 @@ fn run_filelift_command(args: &[String]) -> Result<()> {
     let executable = std::env::current_exe().context("failed to resolve filelift executable")?;
     let status = Command::new(executable)
         .args(args)
+        // The parent REPL prints the update notice once at session end; suppress
+        // it in the per-command child processes to avoid repeated notices.
+        .env(crate::update_check::OPT_OUT_ENV, "1")
         .status()
         .context("failed to run filelift command")?;
     if !status.success() {
