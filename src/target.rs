@@ -64,14 +64,21 @@ impl TargetStore {
 
     pub fn target_and_draft_names(&self) -> Vec<String> {
         let mut names = self.target_names();
-        names.extend(
-            self.draft_targets
-                .keys()
-                .filter(|name| !self.targets.contains_key(*name))
-                .cloned(),
-        );
+        names.extend(self.draft_only_names());
         names.sort();
         names
+    }
+
+    /// Draft target names that do not yet have a fully-created counterpart.
+    ///
+    /// Drafts can only be resumed via `target add`/`update`, so completion must
+    /// keep them out of `target use`/`remove` and `upload --target` suggestions.
+    pub fn draft_only_names(&self) -> Vec<String> {
+        self.draft_targets
+            .keys()
+            .filter(|name| !self.targets.contains_key(*name))
+            .cloned()
+            .collect()
     }
 }
 

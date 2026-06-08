@@ -89,9 +89,15 @@ pub fn localize_command(command: Command) -> Command {
         .mut_subcommand("target", |command| {
             command
                 .about(t("cmd-target-about"))
-                .mut_subcommand("add", |command| command.about(t("cmd-target-add-about")))
+                .mut_subcommand("add", |command| {
+                    command
+                        .about(t("cmd-target-add-about"))
+                        .mut_arg("folder", |arg| arg.help(t("help-target-folder")))
+                })
                 .mut_subcommand("update", |command| {
-                    command.about(t("cmd-target-update-about"))
+                    command
+                        .about(t("cmd-target-update-about"))
+                        .mut_arg("folder", |arg| arg.help(t("help-target-folder")))
                 })
                 .mut_subcommand("list", |command| command.about(t("cmd-target-list-about")))
                 .mut_subcommand("use", |command| command.about(t("cmd-target-use-about")))
@@ -99,7 +105,14 @@ pub fn localize_command(command: Command) -> Command {
                     command.about(t("cmd-target-remove-about"))
                 })
         })
-        .mut_subcommand("upload", |command| command.about(t("cmd-upload-about")))
+        .mut_subcommand("upload", |command| {
+            command
+                .about(t("cmd-upload-about"))
+                .mut_arg("folder", |arg| arg.help(t("help-upload-folder")))
+                .mut_arg("ignore_target_folder", |arg| {
+                    arg.help(t("help-upload-ignore-target-folder"))
+                })
+        })
         .mut_subcommand("log", |command| {
             command
                 .about(t("cmd-log-about"))

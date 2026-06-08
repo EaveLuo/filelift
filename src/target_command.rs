@@ -578,10 +578,12 @@ fn remove(command: TargetRemoveCommand) -> Result<()> {
         command.name,
         interactive::TargetSelectionRequest::Remove,
     )?;
-    store
-        .targets
-        .remove(&name)
-        .with_context(|| format!("target `{name}` does not exist"))?;
+    let removed_target = store.targets.remove(&name).is_some();
+    let removed_draft = store.draft_targets.remove(&name).is_some();
+    anyhow::ensure!(
+        removed_target || removed_draft,
+        "target `{name}` does not exist"
+    );
 
     if store.default_target.as_deref() == Some(name.as_str()) {
         store.default_target = None;

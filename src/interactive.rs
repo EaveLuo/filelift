@@ -16,19 +16,22 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
-    style::{Color, ResetColor, SetForegroundColor},
+    style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
 };
 use inquire::{Confirm, Select};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    interactive_completion::{self, CompletionResult, Suggestion},
+    interactive_completion::{self, CompletionResult, Suggestion, TargetCatalog},
     output, secret,
     target::{self, TargetStore},
 };
 
 const IDLE_HINT_DELAY: Duration = Duration::from_millis(1200);
+/// Upper bound on completion rows printed at once, so a large directory cannot
+/// flood the terminal; the remainder is summarized as `... N more`.
+const MAX_LISTED_CANDIDATES: usize = 50;
 const HISTORY_LIMIT: usize = 200;
 const HISTORY_KEY_ENV: &str = "FILELIFT_HISTORY_KEY_HEX";
 const HISTORY_KEY_LEN: usize = 32;
@@ -70,10 +73,16 @@ pub async fn run() -> Result<()> {
     let mut history = history_store.entries_for(&history_key);
 
     loop {
-        let targets = TargetStore::load()
-            .map(|store| store.target_and_draft_names())
+        let store = TargetStore::load().ok();
+        let active_targets = store
+            .as_ref()
+            .map(TargetStore::target_names)
             .unwrap_or_default();
-        let Some(line) = read_line(&targets, &mut history)? else {
+        let draft_targets = store
+            .as_ref()
+            .map(TargetStore::draft_only_names)
+            .unwrap_or_default();
+        let Some(line) = read_line(&active_targets, &draft_targets, &mut history)? else {
             break;
         };
         history_store.replace_entries(&history_key, history.clone());
@@ -114,8 +123,8 @@ pub fn parse_interactive_line(line: &str) -> Result<Vec<String>> {
     shell_words::split(line).context("failed to parse command line")
 }
 
-pub fn idle_hint(line: &str, targets: &[String]) -> Option<String> {
-    interactive_completion::hint(line, targets)
+pub fn idle_hint(line: &str, catalog: TargetCatalog<'_>) -> Option<String> {
+    interactive_completion::hint(line, catalog)
 }
 
 pub fn target_selection_request(args: &[&str]) -> Option<TargetSelectionRequest> {
@@ -203,7 +212,7 @@ pub fn select_target_for_request(request: TargetSelectionRequest) -> Result<Stri
         TargetSelectionRequest::Remove => {
             let name = select_target_name(
                 "Select a target to remove",
-                TargetSelectionScope::TargetsOnly,
+                TargetSelectionScope::TargetsAndDrafts,
             )?;
             let confirmed = Confirm::new(&format!("Remove target `{name}`?"))
                 .with_default(false)
@@ -453,27 +462,469 @@ struct EncryptedHistory {
     ciphertext: String,
 }
 
-fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<String>> {
-    let _raw_mode = RawMode::enter()?;
-    let mut stdout = io::stdout();
-    let mut input = String::new();
-    let mut cursor_index = 0;
-    let mut visible_hint: Option<String> = None;
-    let mut candidates = Vec::new();
-    let mut rendered_rows = 0;
-    let mut last_edit = Instant::now();
-    let mut history_cursor: Option<usize> = None;
-    let mut history_draft = String::new();
-    let mut mode = InputMode::Insert;
+/// What occupies the space around the prompt while editing one line. Exactly one
+/// variant is active at a time, which is precisely what disambiguates the arrow
+/// keys: while a [`CompletionPanel`] is open Up/Down move its selection, and
+/// otherwise they browse history.
+enum Overlay {
+    /// Nothing beyond the prompt line.
+    None,
+    /// A one-line inline hint drawn after the input (adds no extra rows). Shown
+    /// after a brief idle pause.
+    Hint(String),
+    /// A navigable, multi-row completion list drawn below the prompt.
+    Completions(CompletionPanel),
+}
 
-    rendered_rows = render_screen(
-        &mut stdout,
-        rendered_rows,
-        &input,
-        cursor_index,
-        visible_hint.as_deref(),
-        &candidates,
-    )?;
+impl Overlay {
+    fn is_none(&self) -> bool {
+        matches!(self, Overlay::None)
+    }
+
+    fn hint(&self) -> Option<&str> {
+        match self {
+            Overlay::Hint(text) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    fn panel(&self) -> Option<&CompletionPanel> {
+        match self {
+            Overlay::Completions(panel) => Some(panel),
+            _ => None,
+        }
+    }
+}
+
+/// A completion list shown below the prompt that the user can navigate with the
+/// arrow keys (or Tab) and accept with Enter.
+struct CompletionPanel {
+    items: Vec<Suggestion>,
+    /// Highlighted row, or `None` while the list is shown purely for reference
+    /// and no row has been chosen yet.
+    selected: Option<usize>,
+}
+
+impl CompletionPanel {
+    fn new(items: Vec<Suggestion>) -> Self {
+        Self {
+            items,
+            selected: None,
+        }
+    }
+
+    /// Number of rows that can actually be highlighted, which mirrors the number
+    /// of rows the renderer draws (the rest are summarized as `... N more`).
+    fn selectable_len(&self) -> usize {
+        self.items.len().min(MAX_LISTED_CANDIDATES)
+    }
+
+    /// Highlights the next row, wrapping around; selects the first row when
+    /// nothing is highlighted yet.
+    fn select_next(&mut self) {
+        let len = self.selectable_len();
+        if len == 0 {
+            return;
+        }
+        self.selected = Some(match self.selected {
+            None => 0,
+            Some(index) => (index + 1) % len,
+        });
+    }
+
+    /// Highlights the previous row, wrapping around; selects the last row when
+    /// nothing is highlighted yet.
+    fn select_prev(&mut self) {
+        let len = self.selectable_len();
+        if len == 0 {
+            return;
+        }
+        self.selected = Some(match self.selected {
+            None | Some(0) => len - 1,
+            Some(index) => index - 1,
+        });
+    }
+
+    fn selected_item(&self) -> Option<&Suggestion> {
+        self.selected.and_then(|index| self.items.get(index))
+    }
+}
+
+/// Outcome of handling one key, telling the read loop whether to keep editing,
+/// submit the current line, or abort input entirely.
+enum Flow {
+    Continue,
+    Submit,
+    Cancel,
+}
+
+/// All mutable state for a single line being read interactively.
+///
+/// [`LineEditor::handle_key`] is the *only* place that mutates this state, and
+/// [`Screen::render`] is the *only* place that draws it. A new key binding is
+/// therefore just another match arm here that edits state; it can never corrupt
+/// the on-screen bookkeeping that lives in [`Screen`].
+struct LineEditor {
+    input: String,
+    cursor: usize,
+    mode: InputMode,
+    overlay: Overlay,
+    history_cursor: Option<usize>,
+    history_draft: String,
+}
+
+impl LineEditor {
+    fn new() -> Self {
+        Self {
+            input: String::new(),
+            cursor: 0,
+            mode: InputMode::Insert,
+            overlay: Overlay::None,
+            history_cursor: None,
+            history_draft: String::new(),
+        }
+    }
+
+    /// Applies one key event to the editor. Sets `edited` to true when the input
+    /// text changed, so the caller can reset the idle-hint timer in one place.
+    fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        catalog: TargetCatalog<'_>,
+        history: &[String],
+        edited: &mut bool,
+    ) -> Flow {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => return Flow::Cancel,
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => {
+                // A highlighted completion is accepted first; only a plain Enter
+                // (no panel selection) submits the line.
+                if self.accept_selection() {
+                    *edited = true;
+                    return Flow::Continue;
+                }
+                return Flow::Submit;
+            }
+            KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('h'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('w'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                if clears_input_key(key) {
+                    clear_input(&mut self.input, &mut self.cursor);
+                } else {
+                    backspace_before_cursor(&mut self.input, &mut self.cursor);
+                }
+                self.reset_after_edit();
+                *edited = true;
+            }
+            KeyEvent {
+                code: KeyCode::Delete,
+                ..
+            } => {
+                delete_at_cursor(&mut self.input, &mut self.cursor);
+                self.reset_after_edit();
+                *edited = true;
+            }
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            } => {
+                self.on_tab(catalog);
+                *edited = true;
+            }
+            KeyEvent {
+                code: KeyCode::Up, ..
+            } => {
+                if let Overlay::Completions(panel) = &mut self.overlay {
+                    panel.select_prev();
+                } else {
+                    self.history_prev(history);
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            } => {
+                if let Overlay::Completions(panel) = &mut self.overlay {
+                    panel.select_next();
+                } else {
+                    self.history_next(history);
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Left,
+                modifiers,
+                ..
+            } => {
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    move_cursor_word_left(&self.input, &mut self.cursor);
+                } else {
+                    move_cursor_left(&self.input, &mut self.cursor);
+                }
+                self.overlay = Overlay::None;
+            }
+            KeyEvent {
+                code: KeyCode::Right,
+                modifiers,
+                ..
+            } => {
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    move_cursor_word_right(&self.input, &mut self.cursor);
+                } else {
+                    move_cursor_right(&self.input, &mut self.cursor);
+                }
+                self.overlay = Overlay::None;
+            }
+            KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                move_cursor_word_left(&self.input, &mut self.cursor);
+                self.overlay = Overlay::None;
+            }
+            KeyEvent {
+                code: KeyCode::Char('f'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                move_cursor_word_right(&self.input, &mut self.cursor);
+                self.overlay = Overlay::None;
+            }
+            KeyEvent {
+                code: KeyCode::Home,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.cursor = 0;
+                self.overlay = Overlay::None;
+            }
+            KeyEvent {
+                code: KeyCode::End, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('e'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.cursor = self.input.len();
+                self.overlay = Overlay::None;
+            }
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                // Esc dismisses an open panel first; otherwise it drops into
+                // normal (vi-style) mode.
+                if self.overlay.panel().is_some() {
+                    self.overlay = Overlay::None;
+                } else {
+                    self.mode = InputMode::Normal;
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers,
+                ..
+            } if !modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if self.mode == InputMode::Normal {
+                    handle_normal_mode_key(ch, &mut self.mode, &mut self.input, &mut self.cursor);
+                } else {
+                    insert_at_cursor(&mut self.input, &mut self.cursor, ch);
+                }
+                self.reset_after_edit();
+                *edited = true;
+            }
+            _ => {}
+        }
+        Flow::Continue
+    }
+
+    /// Clears transient state after the input text changed.
+    fn reset_after_edit(&mut self) {
+        self.history_cursor = None;
+        self.overlay = Overlay::None;
+    }
+
+    /// Accepts the highlighted completion, if any, applying it to the input.
+    /// Returns true when a selection was consumed.
+    fn accept_selection(&mut self) -> bool {
+        let completed = {
+            let Some(panel) = self.overlay.panel() else {
+                return false;
+            };
+            let Some(item) = panel.selected_item() else {
+                return false;
+            };
+            interactive_completion::apply(&self.input, item)
+        };
+        self.input = completed;
+        self.cursor = self.input.len();
+        self.overlay = Overlay::None;
+        self.history_cursor = None;
+        true
+    }
+
+    /// Handles Tab: advances an already-open panel, inserts the single
+    /// unambiguous completion, or opens a panel for multiple matches.
+    fn on_tab(&mut self, catalog: TargetCatalog<'_>) {
+        if let Overlay::Completions(panel) = &mut self.overlay {
+            panel.select_next();
+            return;
+        }
+        match interactive_completion::complete(&self.input, catalog) {
+            CompletionResult::Insert(completed) => {
+                self.input = completed;
+                self.cursor = self.input.len();
+                self.overlay = Overlay::None;
+            }
+            CompletionResult::Candidates(items) => {
+                self.overlay = Overlay::Completions(CompletionPanel::new(items));
+            }
+            CompletionResult::None => self.overlay = Overlay::None,
+        }
+        self.history_cursor = None;
+    }
+
+    fn history_prev(&mut self, history: &[String]) {
+        if history.is_empty() {
+            return;
+        }
+        match self.history_cursor {
+            None => {
+                self.history_draft = self.input.clone();
+                self.history_cursor = Some(history.len() - 1);
+            }
+            Some(index) => self.history_cursor = Some(index.saturating_sub(1)),
+        }
+        let index = self.history_cursor.expect("history cursor set above");
+        self.input = history[index].clone();
+        self.cursor = self.input.len();
+        self.overlay = Overlay::None;
+    }
+
+    fn history_next(&mut self, history: &[String]) {
+        let Some(index) = self.history_cursor else {
+            return;
+        };
+        if index + 1 < history.len() {
+            self.history_cursor = Some(index + 1);
+            self.input = history[index + 1].clone();
+        } else {
+            self.history_cursor = None;
+            self.input = self.history_draft.clone();
+        }
+        self.cursor = self.input.len();
+        self.overlay = Overlay::None;
+    }
+}
+
+/// Owns the terminal handle and the one piece of bookkeeping the whole rendering
+/// scheme relies on: how many rows the previous frame painted below the prompt.
+///
+/// Every repaint goes through [`Screen::render`], which always clears exactly
+/// that many rows before drawing the next frame. Centralizing it here is what
+/// makes the "blank gap after the panel disappears" class of bug structurally
+/// impossible — no key handler ever touches the row count.
+struct Screen {
+    stdout: io::Stdout,
+    rows_below: usize,
+}
+
+impl Screen {
+    fn new() -> Self {
+        Self {
+            stdout: io::stdout(),
+            rows_below: 0,
+        }
+    }
+
+    /// Repaints the whole frame from the editor state, leaving the cursor at the
+    /// edit position on the prompt line.
+    fn render(&mut self, editor: &LineEditor) -> Result<()> {
+        let stdout = &mut self.stdout;
+        clear_frame(stdout, self.rows_below)?;
+
+        let hint = editor.overlay.hint();
+        let cursor_column = draw_prompt_line(stdout, &editor.input, editor.cursor, hint)?;
+
+        let rows = match editor.overlay.panel() {
+            Some(panel) => draw_completion_panel(stdout, panel)?,
+            None => 0,
+        };
+
+        if rows > 0 {
+            execute!(stdout, cursor::MoveUp(rows as u16))?;
+        }
+        execute!(stdout, cursor::MoveToColumn(cursor_column))?;
+        stdout.flush().context("failed to flush terminal")?;
+
+        self.rows_below = rows;
+        Ok(())
+    }
+
+    /// Commits the entered line to scrollback as `filelift> <input>` and advances
+    /// to a fresh line so command output starts cleanly below it.
+    fn commit(&mut self, input: &str) -> Result<()> {
+        clear_frame(&mut self.stdout, self.rows_below)?;
+        write!(self.stdout, "filelift> {input}")?;
+        write!(self.stdout, "\r\n")?;
+        self.stdout.flush().context("failed to flush terminal")?;
+        self.rows_below = 0;
+        Ok(())
+    }
+
+    /// Clears the frame and advances to a fresh line; used when input is aborted.
+    fn finish(&mut self) -> Result<()> {
+        clear_frame(&mut self.stdout, self.rows_below)?;
+        write!(self.stdout, "\r\n")?;
+        self.stdout.flush().context("failed to flush terminal")?;
+        self.rows_below = 0;
+        Ok(())
+    }
+}
+
+fn read_line(
+    active_targets: &[String],
+    draft_targets: &[String],
+    history: &mut Vec<String>,
+) -> Result<Option<String>> {
+    let catalog = TargetCatalog {
+        active: active_targets,
+        drafts: draft_targets,
+    };
+    let _raw_mode = RawMode::enter()?;
+    let mut screen = Screen::new();
+    let mut editor = LineEditor::new();
+    let mut last_edit = Instant::now();
+
+    screen.render(&editor)?;
 
     loop {
         if event::poll(Duration::from_millis(80)).context("failed to poll terminal input")? {
@@ -485,328 +936,30 @@ fn read_line(targets: &[String], history: &mut Vec<String>) -> Result<Option<Str
                 continue;
             }
 
-            match key {
-                KeyEvent {
-                    code: KeyCode::Char('c'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
+            let mut edited = false;
+            match editor.handle_key(key, catalog, history.as_slice(), &mut edited) {
+                Flow::Continue => {}
+                Flow::Submit => {
+                    screen.commit(&editor.input)?;
+                    record_history_entry(history, editor.input.trim());
+                    return Ok(Some(editor.input));
                 }
-                | KeyEvent {
-                    code: KeyCode::Char('d'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
-                    clear_rendered_screen(&mut stdout, rendered_rows)?;
-                    writeln!(stdout)?;
+                Flow::Cancel => {
+                    screen.finish()?;
                     return Ok(None);
                 }
-                KeyEvent {
-                    code: KeyCode::Enter,
-                    ..
-                } => {
-                    clear_rendered_screen(&mut stdout, rendered_rows)?;
-                    write!(stdout, "filelift> {}", input)?;
-                    writeln!(stdout)?;
-                    let line = input.trim();
-                    record_history_entry(history, line);
-                    return Ok(Some(input));
-                }
-                KeyEvent {
-                    code: KeyCode::Backspace,
-                    ..
-                }
-                | KeyEvent {
-                    code: KeyCode::Char('h'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                }
-                | KeyEvent {
-                    code: KeyCode::Char('w'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
-                    if clears_input_key(key) {
-                        clear_input(&mut input, &mut cursor_index);
-                    } else {
-                        backspace_before_cursor(&mut input, &mut cursor_index);
-                    }
-                    history_cursor = None;
-                    visible_hint = None;
-                    candidates.clear();
-                    last_edit = Instant::now();
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::Delete,
-                    ..
-                } => {
-                    delete_at_cursor(&mut input, &mut cursor_index);
-                    history_cursor = None;
-                    visible_hint = None;
-                    candidates.clear();
-                    last_edit = Instant::now();
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::Tab, ..
-                } => {
-                    match interactive_completion::complete(&input, targets) {
-                        CompletionResult::Insert(completed) => {
-                            input = completed;
-                            cursor_index = input.len();
-                            candidates.clear();
-                        }
-                        CompletionResult::Candidates(next_candidates) => {
-                            candidates = next_candidates
-                        }
-                        CompletionResult::None => {}
-                    }
-                    history_cursor = None;
-                    visible_hint = None;
-                    last_edit = Instant::now();
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::Up, ..
-                } => {
-                    if !history.is_empty() {
-                        if history_cursor.is_none() {
-                            history_draft = input.clone();
-                            history_cursor = Some(history.len() - 1);
-                        } else if let Some(index) = history_cursor.as_mut() {
-                            *index = index.saturating_sub(1);
-                        }
-                        input = history[history_cursor.unwrap()].clone();
-                        cursor_index = input.len();
-                        visible_hint = None;
-                        candidates.clear();
-                        rendered_rows = render_screen(
-                            &mut stdout,
-                            rendered_rows,
-                            &input,
-                            cursor_index,
-                            None,
-                            &candidates,
-                        )?;
-                    }
-                }
-                KeyEvent {
-                    code: KeyCode::Down,
-                    ..
-                } => {
-                    if let Some(index) = history_cursor {
-                        if index + 1 < history.len() {
-                            history_cursor = Some(index + 1);
-                            input = history[index + 1].clone();
-                        } else {
-                            history_cursor = None;
-                            input = history_draft.clone();
-                        }
-                        cursor_index = input.len();
-                        visible_hint = None;
-                        candidates.clear();
-                        rendered_rows = render_screen(
-                            &mut stdout,
-                            rendered_rows,
-                            &input,
-                            cursor_index,
-                            None,
-                            &candidates,
-                        )?;
-                    }
-                }
-                KeyEvent {
-                    code: KeyCode::Left,
-                    modifiers,
-                    ..
-                } => {
-                    if modifiers.contains(KeyModifiers::CONTROL) {
-                        move_cursor_word_left(&input, &mut cursor_index);
-                    } else {
-                        move_cursor_left(&input, &mut cursor_index);
-                    }
-                    candidates.clear();
-                    visible_hint = None;
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::Right,
-                    modifiers,
-                    ..
-                } => {
-                    if modifiers.contains(KeyModifiers::CONTROL) {
-                        move_cursor_word_right(&input, &mut cursor_index);
-                    } else {
-                        move_cursor_right(&input, &mut cursor_index);
-                    }
-                    candidates.clear();
-                    visible_hint = None;
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::Char('b'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
-                    move_cursor_word_left(&input, &mut cursor_index);
-                    candidates.clear();
-                    visible_hint = None;
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::Char('f'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
-                    move_cursor_word_right(&input, &mut cursor_index);
-                    candidates.clear();
-                    visible_hint = None;
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::Home,
-                    ..
-                }
-                | KeyEvent {
-                    code: KeyCode::Char('a'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
-                    cursor_index = 0;
-                    candidates.clear();
-                    visible_hint = None;
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::End, ..
-                }
-                | KeyEvent {
-                    code: KeyCode::Char('e'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
-                    cursor_index = input.len();
-                    candidates.clear();
-                    visible_hint = None;
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::Esc, ..
-                } => {
-                    mode = InputMode::Normal;
-                    candidates.clear();
-                    visible_hint = None;
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                KeyEvent {
-                    code: KeyCode::Char(ch),
-                    modifiers,
-                    ..
-                } if !modifiers.contains(KeyModifiers::CONTROL)
-                    && !modifiers.contains(KeyModifiers::ALT) =>
-                {
-                    if mode == InputMode::Normal {
-                        handle_normal_mode_key(ch, &mut mode, &mut input, &mut cursor_index);
-                    } else {
-                        insert_at_cursor(&mut input, &mut cursor_index, ch);
-                    }
-                    history_cursor = None;
-                    visible_hint = None;
-                    candidates.clear();
-                    last_edit = Instant::now();
-                    rendered_rows = render_screen(
-                        &mut stdout,
-                        rendered_rows,
-                        &input,
-                        cursor_index,
-                        None,
-                        &candidates,
-                    )?;
-                }
-                _ => {}
             }
-        } else if visible_hint.is_none() && last_edit.elapsed() >= IDLE_HINT_DELAY {
-            visible_hint = idle_hint(&input, targets);
-            if visible_hint.is_some() {
-                rendered_rows = render_screen(
-                    &mut stdout,
-                    rendered_rows,
-                    &input,
-                    cursor_index,
-                    visible_hint.as_deref(),
-                    &candidates,
-                )?;
+
+            if edited {
+                last_edit = Instant::now();
             }
+            screen.render(&editor)?;
+        } else if editor.overlay.is_none()
+            && last_edit.elapsed() >= IDLE_HINT_DELAY
+            && let Some(hint) = idle_hint(&editor.input, catalog)
+        {
+            editor.overlay = Overlay::Hint(hint);
+            screen.render(&editor)?;
         }
     }
 }
@@ -827,15 +980,54 @@ fn args_as_strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
 }
 
-fn render_screen(
+/// Draws the prompt, the current input, and an optional inline hint on a single
+/// terminal line, leaving the cursor at the logical edit position.
+///
+/// The interactive editor deliberately keeps everything on one line: completion
+/// candidates are emitted as committed scrollback by [`show_candidates`] rather
+/// than as a multi-row overlay. That keeps clearing trivial (always just the
+/// current line) and avoids leaving blank gaps behind once the terminal scrolls.
+/// Clears the current frame — the prompt line plus `rows_below` rows beneath it —
+/// leaving the cursor at column 0 of the prompt line.
+///
+/// This is the single primitive every repaint funnels through, which is why the
+/// renderer can guarantee no stale rows survive into the next frame.
+fn clear_frame(stdout: &mut io::Stdout, rows_below: usize) -> Result<()> {
+    execute!(
+        stdout,
+        cursor::MoveToColumn(0),
+        Clear(ClearType::CurrentLine)
+    )
+    .context("failed to clear interactive prompt")?;
+    for _ in 0..rows_below {
+        execute!(
+            stdout,
+            cursor::MoveDown(1),
+            cursor::MoveToColumn(0),
+            Clear(ClearType::CurrentLine)
+        )
+        .context("failed to clear interactive panel")?;
+    }
+    if rows_below > 0 {
+        execute!(
+            stdout,
+            cursor::MoveUp(rows_below as u16),
+            cursor::MoveToColumn(0)
+        )
+        .context("failed to restore interactive cursor")?;
+    }
+    Ok(())
+}
+
+/// Draws the prompt, the current input, and an optional inline hint on the
+/// current line. Assumes the line was already cleared by [`clear_frame`] and
+/// returns the terminal column where the edit cursor belongs.
+fn draw_prompt_line(
     stdout: &mut io::Stdout,
-    previous_rows: usize,
     input: &str,
     cursor_index: usize,
     hint: Option<&str>,
-    candidates: &[Suggestion],
-) -> Result<usize> {
-    clear_rendered_screen(stdout, previous_rows)?;
+) -> Result<u16> {
     let prompt = "filelift> ";
     let width = terminal::size()
         .map(|(width, _)| width as usize)
@@ -859,50 +1051,42 @@ fn render_screen(
         write!(stdout, "{hint_prefix}{display_hint}")?;
         execute!(stdout, ResetColor)?;
     }
-
-    for suggestion in candidates {
-        writeln!(stdout)?;
-        execute!(stdout, SetForegroundColor(Color::Cyan))?;
-        write!(stdout, "  {}", suggestion.value)?;
-        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
-        write!(stdout, "  {}", suggestion.description)?;
-        execute!(stdout, ResetColor)?;
-    }
-
-    if !candidates.is_empty() {
-        execute!(stdout, cursor::MoveUp(candidates.len() as u16))?;
-    }
-    execute!(stdout, cursor::MoveToColumn(cursor_column))?;
-    stdout.flush().context("failed to flush terminal")?;
-    Ok(candidates.len())
+    Ok(cursor_column)
 }
 
-fn clear_rendered_screen(stdout: &mut io::Stdout, rows_below_prompt: usize) -> Result<()> {
-    execute!(
-        stdout,
-        cursor::MoveToColumn(0),
-        Clear(ClearType::CurrentLine)
-    )
-    .context("failed to clear interactive prompt")?;
-
-    for _ in 0..rows_below_prompt {
-        execute!(
-            stdout,
-            cursor::MoveDown(1),
-            cursor::MoveToColumn(0),
-            Clear(ClearType::CurrentLine)
-        )
-        .context("failed to clear interactive completions")?;
+/// Draws the completion panel on the rows below the prompt, highlighting the
+/// selected row, and returns how many rows it painted so the renderer can record
+/// the frame height. Leaves the cursor at the end of the last painted row.
+fn draw_completion_panel(stdout: &mut io::Stdout, panel: &CompletionPanel) -> Result<usize> {
+    let shown = panel.items.len().min(MAX_LISTED_CANDIDATES);
+    let mut rows = 0;
+    for (index, suggestion) in panel.items[..shown].iter().enumerate() {
+        write!(stdout, "\r\n")?;
+        if panel.selected == Some(index) {
+            execute!(
+                stdout,
+                SetBackgroundColor(Color::Cyan),
+                SetForegroundColor(Color::Black)
+            )?;
+            write!(stdout, "> {}  {}", suggestion.value, suggestion.description)?;
+            execute!(stdout, ResetColor)?;
+        } else {
+            execute!(stdout, SetForegroundColor(Color::Cyan))?;
+            write!(stdout, "  {}", suggestion.value)?;
+            execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+            write!(stdout, "  {}", suggestion.description)?;
+            execute!(stdout, ResetColor)?;
+        }
+        rows += 1;
     }
-    if rows_below_prompt > 0 {
-        execute!(
-            stdout,
-            cursor::MoveUp(rows_below_prompt as u16),
-            cursor::MoveToColumn(0)
-        )
-        .context("failed to restore interactive cursor")?;
+    if panel.items.len() > shown {
+        write!(stdout, "\r\n")?;
+        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        write!(stdout, "  ... {} more", panel.items.len() - shown)?;
+        execute!(stdout, ResetColor)?;
+        rows += 1;
     }
-    Ok(())
+    Ok(rows)
 }
 
 fn visible_tail(value: &str, max_chars: usize) -> String {
@@ -1168,6 +1352,161 @@ impl Drop for RawMode {
 mod tests {
     use super::*;
 
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn sample_panel(count: usize) -> CompletionPanel {
+        let items = (0..count)
+            .map(|index| Suggestion {
+                value: format!("item{index}"),
+                description: String::new(),
+                append_space: true,
+                draft: false,
+            })
+            .collect();
+        CompletionPanel::new(items)
+    }
+
+    #[test]
+    fn completion_panel_navigation_wraps_in_both_directions() {
+        let mut panel = sample_panel(3);
+        assert_eq!(panel.selected, None);
+
+        panel.select_next();
+        assert_eq!(panel.selected, Some(0));
+        panel.select_next();
+        assert_eq!(panel.selected, Some(1));
+        panel.select_next();
+        assert_eq!(panel.selected, Some(2));
+        panel.select_next();
+        assert_eq!(panel.selected, Some(0), "next wraps to the first row");
+
+        panel.select_prev();
+        assert_eq!(panel.selected, Some(2), "prev wraps to the last row");
+    }
+
+    #[test]
+    fn completion_panel_prev_from_unselected_picks_last_row() {
+        let mut panel = sample_panel(3);
+        panel.select_prev();
+        assert_eq!(panel.selected, Some(2));
+    }
+
+    #[test]
+    fn arrows_drive_the_panel_while_open_and_history_when_closed() {
+        let history = vec!["upload a".to_string(), "target list".to_string()];
+        let catalog = TargetCatalog {
+            active: &[],
+            drafts: &[],
+        };
+        let mut editor = LineEditor::new();
+        let mut edited = false;
+
+        // With no panel, Up browses history (most recent first).
+        editor.handle_key(press(KeyCode::Up), catalog, &history, &mut edited);
+        assert_eq!(editor.input, "target list");
+        assert!(editor.overlay.is_none());
+
+        // While a panel is open, Up/Down move the selection and never touch
+        // either the input or history navigation.
+        editor.overlay = Overlay::Completions(sample_panel(2));
+        editor.handle_key(press(KeyCode::Down), catalog, &history, &mut edited);
+        assert_eq!(editor.input, "target list");
+        assert_eq!(editor.overlay.panel().unwrap().selected, Some(0));
+        editor.handle_key(press(KeyCode::Down), catalog, &history, &mut edited);
+        assert_eq!(editor.overlay.panel().unwrap().selected, Some(1));
+    }
+
+    #[test]
+    fn enter_accepts_highlighted_completion_without_submitting() {
+        let catalog = TargetCatalog {
+            active: &[],
+            drafts: &[],
+        };
+        let mut editor = LineEditor::new();
+        editor.input = "tar".to_string();
+        editor.cursor = editor.input.len();
+        editor.overlay = Overlay::Completions(CompletionPanel::new(vec![Suggestion {
+            value: "target".to_string(),
+            description: String::new(),
+            append_space: true,
+            draft: false,
+        }]));
+        if let Overlay::Completions(panel) = &mut editor.overlay {
+            panel.select_next();
+        }
+
+        let mut edited = false;
+        let flow = editor.handle_key(press(KeyCode::Enter), catalog, &[], &mut edited);
+
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(editor.input, "target ");
+        assert!(editor.overlay.is_none());
+    }
+
+    #[test]
+    fn enter_submits_when_no_completion_is_highlighted() {
+        let catalog = TargetCatalog {
+            active: &[],
+            drafts: &[],
+        };
+        let mut editor = LineEditor::new();
+        editor.input = "exit".to_string();
+        editor.overlay = Overlay::Completions(sample_panel(2));
+
+        let mut edited = false;
+        let flow = editor.handle_key(press(KeyCode::Enter), catalog, &[], &mut edited);
+
+        assert!(
+            matches!(flow, Flow::Submit),
+            "an open panel with no highlighted row still submits on Enter"
+        );
+    }
+
+    #[test]
+    fn esc_dismisses_the_panel_before_changing_mode() {
+        let catalog = TargetCatalog {
+            active: &[],
+            drafts: &[],
+        };
+        let mut editor = LineEditor::new();
+        editor.overlay = Overlay::Completions(sample_panel(2));
+
+        let mut edited = false;
+        editor.handle_key(press(KeyCode::Esc), catalog, &[], &mut edited);
+        assert!(editor.overlay.is_none());
+        assert_eq!(
+            editor.mode,
+            InputMode::Insert,
+            "first Esc only closes panel"
+        );
+
+        editor.handle_key(press(KeyCode::Esc), catalog, &[], &mut edited);
+        assert_eq!(
+            editor.mode,
+            InputMode::Normal,
+            "second Esc enters normal mode"
+        );
+    }
+
+    #[test]
+    fn editing_closes_an_open_panel() {
+        let catalog = TargetCatalog {
+            active: &[],
+            drafts: &[],
+        };
+        let mut editor = LineEditor::new();
+        editor.overlay = Overlay::Completions(sample_panel(2));
+
+        let mut edited = false;
+        editor.handle_key(press(KeyCode::Char('x')), catalog, &[], &mut edited);
+
+        assert_eq!(editor.input, "x");
+        assert!(editor.overlay.is_none());
+        assert!(edited);
+    }
+
     #[test]
     fn parses_quoted_interactive_command_like_a_shell() {
         let args = parse_interactive_line("target update \"r2 blog\" --bucket assets").unwrap();
@@ -1180,19 +1519,27 @@ mod tests {
 
     #[test]
     fn hints_without_selecting_when_target_name_is_missing() {
-        let targets = vec!["assets-cdn".to_string(), "r2-blog".to_string()];
+        let active = vec!["assets-cdn".to_string(), "r2-blog".to_string()];
+        let catalog = TargetCatalog {
+            active: &active,
+            drafts: &[],
+        };
 
         assert_eq!(
-            idle_hint("target update", &targets).unwrap(),
+            idle_hint("target update ", catalog).unwrap(),
             "hint: assets-cdn | r2-blog"
         );
     }
 
     #[test]
     fn does_not_hint_when_command_is_complete() {
-        let targets = vec!["r2-blog".to_string()];
+        let active = vec!["r2-blog".to_string()];
+        let catalog = TargetCatalog {
+            active: &active,
+            drafts: &[],
+        };
 
-        assert!(idle_hint("target update r2-blog", &targets).is_none());
+        assert!(idle_hint("target update r2-blog", catalog).is_none());
     }
 
     #[test]

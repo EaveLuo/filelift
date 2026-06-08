@@ -1,15 +1,20 @@
 use std::{
     fs,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
+use indicatif::ProgressBar;
+use tokio::task::JoinSet;
 
 use crate::{cli::UploadCommand, i18n, output, secret, storage, target::TargetStore};
 
+/// Maximum number of files uploaded in parallel for a directory upload.
+const UPLOAD_CONCURRENCY: usize = 8;
+
 pub async fn run(command: UploadCommand) -> Result<()> {
-    let recursive = command.recursive;
     let dry_run = command.dry_run;
     let markdown = command.markdown;
     let store = TargetStore::load()?;
@@ -19,13 +24,12 @@ pub async fn run(command: UploadCommand) -> Result<()> {
         .get(&target_name)
         .with_context(|| format!("target `{target_name}` does not exist"))?;
 
-    let folder = resolve_upload_folder(target.folder.as_deref(), command.folder.as_deref())?;
-    let items = plan_uploads(
-        &command.path,
-        folder.as_deref(),
-        command.name.as_deref(),
-        command.recursive,
+    let folder = resolve_upload_folder(
+        target.folder.as_deref(),
+        command.folder.as_deref(),
+        command.ignore_target_folder,
     )?;
+    let items = plan_uploads(&command.path, folder.as_deref(), command.name.as_deref())?;
     if items.is_empty() {
         bail!("no files matched upload input");
     }
@@ -33,7 +37,6 @@ pub async fn run(command: UploadCommand) -> Result<()> {
     tracing::info!(
         command = "upload",
         target = %target_name,
-        recursive,
         dry_run,
         markdown,
         upload_count,
@@ -41,7 +44,7 @@ pub async fn run(command: UploadCommand) -> Result<()> {
         "upload planned"
     );
 
-    let credentials = if command.dry_run {
+    let credentials = if dry_run {
         None
     } else {
         Some(secret::credentials(&target_name).with_context(|| {
@@ -50,36 +53,53 @@ pub async fn run(command: UploadCommand) -> Result<()> {
     };
 
     let client = if let Some(credentials) = credentials {
-        Some(storage::s3::Client::new(target.clone(), credentials).await?)
+        Some(Arc::new(
+            storage::s3::Client::new(target.clone(), credentials).await?,
+        ))
     } else {
         None
     };
 
-    let progress = if command.dry_run {
+    let progress = if dry_run {
         None
     } else {
         Some(output::upload_progress(upload_count))
     };
 
-    for item in items {
-        let url = output::public_url(target, &item.key)?;
-
-        if let Some(client) = &client {
-            if let Some(progress) = &progress {
-                progress.set_message(format!("Uploading {}", item.key));
-            }
-            if let Err(error) = client.upload_file(&item.local_path, &item.key).await {
-                if let Some(progress) = &progress {
-                    progress.finish_and_clear();
-                }
-                return Err(error);
-            }
-            if let Some(progress) = &progress {
-                progress.inc(1);
-            }
+    if let Some(client) = &client
+        && let Err(error) = upload_items(
+            client.clone(),
+            &items,
+            progress.as_ref(),
+            UPLOAD_CONCURRENCY,
+        )
+        .await
+    {
+        if let Some(progress) = &progress {
+            progress.finish_and_clear();
         }
+        return Err(error);
+    }
 
-        if command.markdown {
+    if let Some(progress) = &progress {
+        progress.finish_and_clear();
+    }
+
+    if dry_run {
+        anstream::eprintln!(
+            "{}",
+            output::info(&format!(
+                "Dry run: {upload_count} file(s) planned for target `{target_name}` (nothing uploaded)."
+            ))
+        );
+        for item in &items {
+            anstream::eprintln!("  {}  ->  {}", item.local_path, item.key);
+        }
+    }
+
+    for item in &items {
+        let url = output::public_url(target, &item.key)?;
+        if markdown {
             let label = item
                 .local_path
                 .file_stem()
@@ -90,8 +110,7 @@ pub async fn run(command: UploadCommand) -> Result<()> {
         }
     }
 
-    if let Some(progress) = &progress {
-        progress.finish_and_clear();
+    if !dry_run {
         anstream::eprintln!(
             "{}",
             output::success(&format!("Uploaded {upload_count} file(s)."))
@@ -101,7 +120,6 @@ pub async fn run(command: UploadCommand) -> Result<()> {
     tracing::info!(
         command = "upload",
         target = %target_name,
-        recursive,
         dry_run,
         markdown,
         upload_count,
@@ -110,6 +128,50 @@ pub async fn run(command: UploadCommand) -> Result<()> {
     );
 
     Ok(())
+}
+
+async fn upload_items(
+    client: Arc<storage::s3::Client>,
+    items: &[UploadItem],
+    progress: Option<&ProgressBar>,
+    concurrency: usize,
+) -> Result<()> {
+    let mut set: JoinSet<Result<()>> = JoinSet::new();
+    let mut pending = items.iter().cloned();
+
+    for _ in 0..concurrency.max(1) {
+        let Some(item) = pending.next() else {
+            break;
+        };
+        spawn_upload(&mut set, client.clone(), item, progress.cloned());
+    }
+
+    while let Some(joined) = set.join_next().await {
+        joined.context("upload task failed to complete")??;
+        if let Some(item) = pending.next() {
+            spawn_upload(&mut set, client.clone(), item, progress.cloned());
+        }
+    }
+
+    Ok(())
+}
+
+fn spawn_upload(
+    set: &mut JoinSet<Result<()>>,
+    client: Arc<storage::s3::Client>,
+    item: UploadItem,
+    progress: Option<ProgressBar>,
+) {
+    set.spawn(async move {
+        if let Some(progress) = &progress {
+            progress.set_message(format!("Uploading {}", item.key));
+        }
+        client.upload_file(&item.local_path, &item.key).await?;
+        if let Some(progress) = &progress {
+            progress.inc(1);
+        }
+        Ok(())
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,7 +184,6 @@ fn plan_uploads(
     path: &Utf8Path,
     prefix: Option<&str>,
     name: Option<&str>,
-    recursive: bool,
 ) -> Result<Vec<UploadItem>> {
     if path.is_file() {
         let filename = name
@@ -137,9 +198,6 @@ fn plan_uploads(
     if path.is_dir() {
         if name.is_some() {
             bail!("--name can only be used with a single file");
-        }
-        if !recursive {
-            bail!("refusing to upload a directory without --recursive");
         }
 
         let mut items = Vec::new();
@@ -193,10 +251,11 @@ fn join_key(prefix: Option<&str>, name: &str) -> String {
 fn resolve_upload_folder(
     target_folder: Option<&str>,
     upload_folder: Option<&str>,
+    ignore_target_folder: bool,
 ) -> Result<Option<String>> {
     let now = DateParts::today_utc();
     let mut parts = Vec::new();
-    if let Some(folder) = normalize_folder(target_folder, now)? {
+    if !ignore_target_folder && let Some(folder) = normalize_folder(target_folder, now)? {
         parts.push(folder);
     }
     if let Some(folder) = normalize_folder(upload_folder, now)? {
@@ -296,7 +355,7 @@ mod tests {
         fs::write(&file_path, "image").unwrap();
         let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
 
-        let items = plan_uploads(&file_path, Some("blog/post"), None, false).unwrap();
+        let items = plan_uploads(&file_path, Some("blog/post"), None).unwrap();
 
         assert_eq!(
             items,
@@ -314,15 +373,22 @@ mod tests {
         fs::write(&file_path, "image").unwrap();
         let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
 
-        let folder = resolve_upload_folder(Some("blog"), Some("posts/2026/06/08")).unwrap();
-        let items = plan_uploads(&file_path, folder.as_deref(), None, false).unwrap();
+        let folder = resolve_upload_folder(Some("blog"), Some("posts/2026/06/08"), false).unwrap();
+        let items = plan_uploads(&file_path, folder.as_deref(), None).unwrap();
 
         assert_eq!(items[0].key, "blog/posts/2026/06/08/cover.webp");
     }
 
     #[test]
+    fn ignore_target_folder_skips_target_base_folder() {
+        let folder = resolve_upload_folder(Some("blog"), Some("posts/2026"), true).unwrap();
+
+        assert_eq!(folder.as_deref(), Some("posts/2026"));
+    }
+
+    #[test]
     fn rejects_parent_directory_segments_in_folder() {
-        let error = resolve_upload_folder(Some("blog"), Some("../private"))
+        let error = resolve_upload_folder(Some("blog"), Some("../private"), false)
             .unwrap_err()
             .to_string();
 
@@ -351,25 +417,25 @@ mod tests {
         fs::write(&file_path, "image").unwrap();
         let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
 
-        let items = plan_uploads(&file_path, Some("blog/post"), Some("cover.webp"), false).unwrap();
+        let items = plan_uploads(&file_path, Some("blog/post"), Some("cover.webp")).unwrap();
 
         assert_eq!(items[0].key, "blog/post/cover.webp");
     }
 
     #[test]
-    fn refuses_directory_without_recursive_flag() {
+    fn rejects_custom_name_for_directory_upload() {
         let tempdir = tempfile::tempdir().unwrap();
         let dir_path = Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf()).unwrap();
 
-        let error = plan_uploads(&dir_path, None, None, false)
+        let error = plan_uploads(&dir_path, None, Some("cover.webp"))
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("--recursive"));
+        assert!(error.contains("--name"));
     }
 
     #[test]
-    fn plans_recursive_directory_upload_with_relative_keys() {
+    fn plans_directory_upload_recursively_by_default() {
         let tempdir = tempfile::tempdir().unwrap();
         let nested = tempdir.path().join("images").join("nested");
         fs::create_dir_all(&nested).unwrap();
@@ -377,7 +443,7 @@ mod tests {
         fs::write(nested.join("demo.mp4"), "video").unwrap();
         let dir_path = Utf8PathBuf::from_path_buf(tempdir.path().join("images")).unwrap();
 
-        let items = plan_uploads(&dir_path, Some("blog/post"), None, true).unwrap();
+        let items = plan_uploads(&dir_path, Some("blog/post"), None).unwrap();
         let keys = items.into_iter().map(|item| item.key).collect::<Vec<_>>();
 
         assert_eq!(

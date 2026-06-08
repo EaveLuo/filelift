@@ -1,32 +1,55 @@
+use crate::i18n;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Suggestion {
     pub value: String,
-    pub description: &'static str,
+    /// Localized helper text shown after the candidate in the interactive list.
+    pub description: String,
     pub append_space: bool,
+    /// Whether this suggestion is a draft (incomplete) target. Drafts are shown
+    /// with an explicit marker so users do not mistake them for usable targets.
+    pub draft: bool,
 }
 
 impl Suggestion {
-    fn command(value: &'static str, description: &'static str) -> Self {
+    /// Builds a suggestion whose description is loaded from the given i18n key.
+    fn localized(value: impl Into<String>, description_key: &str) -> Self {
         Self {
-            value: value.to_string(),
-            description,
+            value: value.into(),
+            description: i18n::t(description_key),
             append_space: true,
+            draft: false,
         }
     }
 
-    fn option(value: &'static str, description: &'static str) -> Self {
-        Self {
-            value: value.to_string(),
-            description,
-            append_space: true,
-        }
+    fn command(value: &'static str, description_key: &str) -> Self {
+        Self::localized(value, description_key)
     }
 
-    fn value(value: String, description: &'static str) -> Self {
+    fn option(value: &'static str, description_key: &str) -> Self {
+        Self::localized(value, description_key)
+    }
+
+    fn value(value: String, description_key: &str) -> Self {
+        Self::localized(value, description_key)
+    }
+
+    fn draft_target(value: String) -> Self {
         Self {
             value,
-            description,
+            description: i18n::t("completion-draft-target"),
             append_space: true,
+            draft: true,
+        }
+    }
+
+    /// Label shown in the inline idle hint, which renders only this string (not
+    /// the description), so drafts must carry their marker here.
+    fn hint_label(&self) -> String {
+        if self.draft {
+            format!("{} {}", self.value, i18n::t("completion-draft-marker"))
+        } else {
+            self.value.clone()
         }
     }
 }
@@ -38,9 +61,54 @@ pub enum CompletionResult {
     Candidates(Vec<Suggestion>),
 }
 
-pub fn hint(line: &str, targets: &[String]) -> Option<String> {
-    let suggestions = suggestions_for_line(line, targets);
+/// Target names available to interactive completion, split by lifecycle so that
+/// suggestions can match what each subcommand can actually operate on.
+///
+/// `active` targets are fully created and usable; `drafts` are targets whose
+/// connectivity check failed and were saved for later resumption. `target use`
+/// and `upload --target` must never surface drafts, while `add`/`update`
+/// (resume) and `remove` (delete) include them with an explicit marker.
+#[derive(Debug, Clone, Copy)]
+pub struct TargetCatalog<'a> {
+    pub active: &'a [String],
+    pub drafts: &'a [String],
+}
+
+/// Which lifecycle of target names a `target` subcommand may complete to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetNameScope {
+    /// Fully-created targets only (`use`).
+    Active,
+    /// Resumable drafts only (`add`, since active names would already exist).
+    Drafts,
+    /// Both active targets and drafts (`update` resumes, `remove` deletes).
+    ActiveAndDrafts,
+}
+
+impl TargetNameScope {
+    fn includes_active(self) -> bool {
+        matches!(self, Self::Active | Self::ActiveAndDrafts)
+    }
+
+    fn includes_drafts(self) -> bool {
+        matches!(self, Self::Drafts | Self::ActiveAndDrafts)
+    }
+}
+
+pub fn hint(line: &str, catalog: TargetCatalog<'_>) -> Option<String> {
+    let suggestions = suggestions_for_line(line, catalog);
     if suggestions.is_empty() {
+        return None;
+    }
+
+    // Don't show a single hint that merely repeats the word already fully typed
+    // (e.g. `target use` hinting `use`); it adds noise without new information.
+    let current_word = if line.ends_with(char::is_whitespace) {
+        ""
+    } else {
+        line.split_whitespace().last().unwrap_or("")
+    };
+    if suggestions.len() == 1 && suggestions[0].value == current_word {
         return None;
     }
 
@@ -49,14 +117,14 @@ pub fn hint(line: &str, targets: &[String]) -> Option<String> {
         suggestions
             .iter()
             .take(5)
-            .map(|suggestion| suggestion.value.as_str())
+            .map(Suggestion::hint_label)
             .collect::<Vec<_>>()
             .join(" | ")
     ))
 }
 
-pub fn complete(line: &str, targets: &[String]) -> CompletionResult {
-    let suggestions = suggestions_for_line(line, targets);
+pub fn complete(line: &str, catalog: TargetCatalog<'_>) -> CompletionResult {
+    let suggestions = suggestions_for_line(line, catalog);
     match suggestions.as_slice() {
         [] => CompletionResult::None,
         [suggestion] => CompletionResult::Insert(apply_suggestion(line, suggestion)),
@@ -64,10 +132,10 @@ pub fn complete(line: &str, targets: &[String]) -> CompletionResult {
     }
 }
 
-pub fn suggestions_for_line(line: &str, targets: &[String]) -> Vec<Suggestion> {
+pub fn suggestions_for_line(line: &str, catalog: TargetCatalog<'_>) -> Vec<Suggestion> {
     let context = CompletionContext::new(line);
 
-    if let Some(suggestions) = target_name_suggestions(&context, targets) {
+    if let Some(suggestions) = target_name_suggestions(&context, catalog) {
         return suggestions;
     }
 
@@ -76,12 +144,12 @@ pub fn suggestions_for_line(line: &str, targets: &[String]) -> Vec<Suggestion> {
         [command] if !context.ends_with_space => {
             let root_matches = prefixed(root_commands(), command);
             if root_matches.len() == 1 && root_matches[0].value == *command {
-                scoped_suggestions(command, "", targets)
+                scoped_suggestions(command, "", catalog)
             } else {
                 root_matches
             }
         }
-        [command] => scoped_suggestions(command, "", targets),
+        [command] => scoped_suggestions(command, "", catalog),
         ["target", subcommand] if !context.ends_with_space => {
             prefixed(target_subcommands(), subcommand)
         }
@@ -102,36 +170,52 @@ pub fn suggestions_for_line(line: &str, targets: &[String]) -> Vec<Suggestion> {
                 Vec::new()
             }
         }
-        ["upload", ..] => upload_scoped_suggestions(&context, targets),
+        ["upload", ..] => upload_scoped_suggestions(&context, catalog),
         _ => Vec::new(),
     }
 }
 
-fn scoped_suggestions(command: &str, prefix: &str, targets: &[String]) -> Vec<Suggestion> {
+fn scoped_suggestions(command: &str, prefix: &str, catalog: TargetCatalog<'_>) -> Vec<Suggestion> {
     match command {
         "target" => prefixed(target_subcommands(), prefix),
         "log" => prefixed(log_subcommands(), prefix),
         "language" => prefixed(language_subcommands(), prefix),
-        "upload" => upload_scoped_suggestions(&CompletionContext::new("upload "), targets),
+        "upload" => upload_scoped_suggestions(&CompletionContext::new("upload "), catalog),
         _ => Vec::new(),
     }
 }
 
 fn target_name_suggestions(
     context: &CompletionContext<'_>,
-    targets: &[String],
+    catalog: TargetCatalog<'_>,
 ) -> Option<Vec<Suggestion>> {
-    if targets.is_empty() {
-        return None;
+    let (scope, prefix) = context.target_name_completion()?;
+
+    let mut suggestions = Vec::new();
+    if scope.includes_active() {
+        suggestions.extend(
+            catalog
+                .active
+                .iter()
+                .filter(|target| target.starts_with(prefix))
+                .map(|target| Suggestion::value(target.clone(), "completion-saved-target")),
+        );
+    }
+    if scope.includes_drafts() {
+        suggestions.extend(
+            catalog
+                .drafts
+                .iter()
+                .filter(|target| target.starts_with(prefix))
+                .map(|target| Suggestion::draft_target(target.clone())),
+        );
     }
 
-    let prefix = context.target_name_prefix()?;
-
-    let suggestions = targets
-        .iter()
-        .filter(|target| target.starts_with(prefix))
-        .map(|target| Suggestion::value(target.clone(), "saved target"))
-        .collect::<Vec<_>>();
+    // Fall through to other suggestions (e.g. options) when nothing matches the
+    // typed name, instead of swallowing the line with an empty candidate list.
+    if suggestions.is_empty() {
+        return None;
+    }
 
     if !context.ends_with_space && suggestions.len() == 1 && suggestions[0].value.as_str() == prefix
     {
@@ -153,7 +237,7 @@ fn target_scoped_suggestions(subcommand: &str, context: &CompletionContext<'_>) 
 fn log_scoped_suggestions(subcommand: &str, prefix: &str) -> Vec<Suggestion> {
     match subcommand {
         "export" => prefixed(
-            vec![Suggestion::option("--output", "write logs to this file")],
+            vec![Suggestion::option("--output", "completion-opt-output")],
             prefix,
         ),
         "clear" => Vec::new(),
@@ -163,14 +247,14 @@ fn log_scoped_suggestions(subcommand: &str, prefix: &str) -> Vec<Suggestion> {
 
 fn upload_scoped_suggestions(
     context: &CompletionContext<'_>,
-    targets: &[String],
+    catalog: TargetCatalog<'_>,
 ) -> Vec<Suggestion> {
     if context.previous_word_is("--target") {
-        return target_value_suggestions(targets, context.current_prefix());
+        return target_value_suggestions(catalog.active, context.current_prefix());
     }
 
     if let Some(prefix) = context.current_prefix().strip_prefix("--target=") {
-        return target_value_suggestions(targets, prefix)
+        return target_value_suggestions(catalog.active, prefix)
             .into_iter()
             .map(|mut suggestion| {
                 suggestion.value = format!("--target={}", suggestion.value);
@@ -179,7 +263,75 @@ fn upload_scoped_suggestions(
             .collect();
     }
 
+    if let Some(prefix) = context.upload_path_prefix() {
+        return path_suggestions(prefix);
+    }
+
     unused_options(upload_options(), context)
+}
+
+fn path_suggestions(prefix: &str) -> Vec<Suggestion> {
+    let (dir, file_prefix) = split_path_prefix(prefix);
+    let read_dir_path = if dir.is_empty() { "." } else { dir };
+    let Ok(entries) = std::fs::read_dir(read_dir_path) else {
+        return Vec::new();
+    };
+
+    let listed = entries.flatten().filter_map(|entry| {
+        let name = entry.file_name().into_string().ok()?;
+        let is_dir = entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false);
+        Some((name, is_dir))
+    });
+
+    let mut suggestions = build_path_suggestions(dir, file_prefix, listed);
+    suggestions.sort_by(|left, right| left.value.cmp(&right.value));
+    suggestions
+}
+
+/// Splits a path prefix into its directory portion (kept verbatim, including the
+/// trailing separator) and the partial file name being typed.
+fn split_path_prefix(prefix: &str) -> (&str, &str) {
+    match prefix.rfind(['/', '\\']) {
+        Some(index) => prefix.split_at(index + 1),
+        None => ("", prefix),
+    }
+}
+
+fn build_path_suggestions(
+    dir: &str,
+    file_prefix: &str,
+    entries: impl Iterator<Item = (String, bool)>,
+) -> Vec<Suggestion> {
+    let mut suggestions = Vec::new();
+    for (name, is_dir) in entries {
+        if !name.starts_with(file_prefix) {
+            continue;
+        }
+        // Hide dotfiles unless the user explicitly started typing a leading dot.
+        if name.starts_with('.') && !file_prefix.starts_with('.') {
+            continue;
+        }
+
+        let mut value = format!("{dir}{name}");
+        if is_dir {
+            value.push('/');
+        }
+        suggestions.push(Suggestion {
+            value,
+            description: i18n::t(if is_dir {
+                "completion-path-directory"
+            } else {
+                "completion-path-file"
+            }),
+            // Keep the cursor on directories so the user can keep descending.
+            append_space: !is_dir,
+            draft: false,
+        });
+    }
+    suggestions
 }
 
 fn unused_options(values: Vec<Suggestion>, context: &CompletionContext<'_>) -> Vec<Suggestion> {
@@ -194,7 +346,7 @@ fn target_value_suggestions(targets: &[String], prefix: &str) -> Vec<Suggestion>
     targets
         .iter()
         .filter(|target| target.starts_with(prefix))
-        .map(|target| Suggestion::value(target.clone(), "saved target"))
+        .map(|target| Suggestion::value(target.clone(), "completion-saved-target"))
         .collect()
 }
 
@@ -203,6 +355,13 @@ fn prefixed(values: Vec<Suggestion>, prefix: &str) -> Vec<Suggestion> {
         .into_iter()
         .filter(|suggestion| suggestion.value.starts_with(prefix))
         .collect()
+}
+
+/// Applies a chosen suggestion to the current line, replacing the in-progress
+/// word with the suggestion's value. Used when the user accepts a highlighted
+/// candidate from the interactive completion panel.
+pub fn apply(line: &str, suggestion: &Suggestion) -> String {
+    apply_suggestion(line, suggestion)
 }
 
 fn apply_suggestion(line: &str, suggestion: &Suggestion) -> String {
@@ -228,58 +387,58 @@ fn current_prefix_start(line: &str) -> usize {
 
 fn root_commands() -> Vec<Suggestion> {
     vec![
-        Suggestion::command("target", "manage upload targets"),
-        Suggestion::command("upload", "upload files"),
-        Suggestion::command("log", "manage diagnostic logs"),
-        Suggestion::command("language", "manage CLI language"),
-        Suggestion::command("exit", "leave interactive mode"),
-        Suggestion::command("quit", "leave interactive mode"),
+        Suggestion::command("target", "completion-cmd-target"),
+        Suggestion::command("upload", "completion-cmd-upload"),
+        Suggestion::command("log", "completion-cmd-log"),
+        Suggestion::command("language", "completion-cmd-language"),
+        Suggestion::command("exit", "completion-cmd-exit"),
+        Suggestion::command("quit", "completion-cmd-exit"),
     ]
 }
 
 fn target_subcommands() -> Vec<Suggestion> {
     vec![
-        Suggestion::command("add", "add a target"),
-        Suggestion::command("update", "update a target"),
-        Suggestion::command("list", "list targets"),
-        Suggestion::command("use", "select the default target"),
-        Suggestion::command("remove", "remove a target"),
+        Suggestion::command("add", "completion-target-add"),
+        Suggestion::command("update", "completion-target-update"),
+        Suggestion::command("list", "completion-target-list"),
+        Suggestion::command("use", "completion-target-use"),
+        Suggestion::command("remove", "completion-target-remove"),
     ]
 }
 
 fn log_subcommands() -> Vec<Suggestion> {
     vec![
-        Suggestion::command("export", "export diagnostic logs"),
-        Suggestion::command("clear", "clear diagnostic logs"),
+        Suggestion::command("export", "completion-log-export"),
+        Suggestion::command("clear", "completion-log-clear"),
     ]
 }
 
 fn language_subcommands() -> Vec<Suggestion> {
     vec![
-        Suggestion::command("show", "show current language"),
-        Suggestion::command("use", "set language"),
+        Suggestion::command("show", "completion-language-show"),
+        Suggestion::command("use", "completion-language-use"),
     ]
 }
 
 fn language_values() -> Vec<Suggestion> {
     vec![
-        Suggestion::command("en", "English"),
-        Suggestion::command("zh-CN", "Simplified Chinese"),
+        Suggestion::command("en", "completion-language-en"),
+        Suggestion::command("zh-CN", "completion-language-zh"),
     ]
 }
 
 fn target_add_options() -> Vec<Suggestion> {
     vec![
-        Suggestion::option("--provider", "storage provider"),
-        Suggestion::option("--bucket", "bucket name"),
-        Suggestion::option("--endpoint", "S3-compatible endpoint"),
-        Suggestion::option("--region", "storage region"),
-        Suggestion::option("--public-base-url", "public file URL base"),
-        Suggestion::option("--folder", "object key folder"),
-        Suggestion::option("--access-key-id", "access key id"),
-        Suggestion::option("--secret-access-key", "secret access key"),
-        Suggestion::option("--set-default", "make this target default"),
-        Suggestion::option("--skip-check", "skip connectivity check"),
+        Suggestion::option("--provider", "completion-opt-provider"),
+        Suggestion::option("--bucket", "completion-opt-bucket"),
+        Suggestion::option("--endpoint", "completion-opt-endpoint"),
+        Suggestion::option("--region", "completion-opt-region"),
+        Suggestion::option("--public-base-url", "completion-opt-public-base-url"),
+        Suggestion::option("--folder", "completion-opt-folder"),
+        Suggestion::option("--access-key-id", "completion-opt-access-key-id"),
+        Suggestion::option("--secret-access-key", "completion-opt-secret-access-key"),
+        Suggestion::option("--set-default", "completion-opt-set-default"),
+        Suggestion::option("--skip-check", "completion-opt-skip-check"),
     ]
 }
 
@@ -289,12 +448,15 @@ fn target_update_options() -> Vec<Suggestion> {
 
 fn upload_options() -> Vec<Suggestion> {
     vec![
-        Suggestion::option("--target", "target name"),
-        Suggestion::option("--folder", "object key folder"),
-        Suggestion::option("--name", "object key name"),
-        Suggestion::option("--recursive", "upload a directory recursively"),
-        Suggestion::option("--markdown", "print markdown image links"),
-        Suggestion::option("--dry-run", "plan without uploading"),
+        Suggestion::option("--target", "completion-opt-target"),
+        Suggestion::option("--folder", "completion-opt-folder"),
+        Suggestion::option("--name", "completion-opt-name"),
+        Suggestion::option(
+            "--ignore-target-folder",
+            "completion-opt-ignore-target-folder",
+        ),
+        Suggestion::option("--markdown", "completion-opt-markdown"),
+        Suggestion::option("--dry-run", "completion-opt-dry-run"),
     ]
 }
 
@@ -342,58 +504,139 @@ impl<'a> CompletionContext<'a> {
         options
     }
 
-    fn target_name_prefix(&self) -> Option<&str> {
+    fn target_name_completion(&self) -> Option<(TargetNameScope, &'a str)> {
         let ["target", subcommand, rest @ ..] = self.words.as_slice() else {
             return None;
         };
 
-        match *subcommand {
-            "use" | "remove" => self.simple_target_name_prefix(rest),
-            "update" => self.update_target_name_prefix(rest),
-            _ => None,
-        }
+        let (scope, prefix) = match *subcommand {
+            "use" => (
+                TargetNameScope::Active,
+                self.simple_target_name_prefix(rest)?,
+            ),
+            "remove" => (
+                TargetNameScope::ActiveAndDrafts,
+                self.simple_target_name_prefix(rest)?,
+            ),
+            "add" => (
+                TargetNameScope::Drafts,
+                self.positional_target_name_prefix(rest)?,
+            ),
+            "update" => (
+                TargetNameScope::ActiveAndDrafts,
+                self.positional_target_name_prefix(rest)?,
+            ),
+            _ => return None,
+        };
+        Some((scope, prefix))
     }
 
-    fn simple_target_name_prefix(&self, rest: &[&'a str]) -> Option<&'a str> {
-        match rest {
-            [] => Some(""),
-            [name] if !self.ends_with_space => Some(name),
-            _ => None,
-        }
-    }
+    /// Returns the partial path being typed when the cursor is on `upload`'s
+    /// positional path argument (and not on an option or option value).
+    fn upload_path_prefix(&self) -> Option<&'a str> {
+        let ["upload", rest @ ..] = self.words.as_slice() else {
+            return None;
+        };
 
-    fn update_target_name_prefix(&self, rest: &[&'a str]) -> Option<&'a str> {
-        if rest.is_empty() {
-            return Some("");
+        let (completed, current) = if self.ends_with_space {
+            (rest, "")
+        } else {
+            match rest.split_last() {
+                Some((last, head)) => (head, *last),
+                None => (rest, ""),
+            }
+        };
+
+        if current.starts_with('-') {
+            return None;
         }
 
         let mut index = 0;
-        while index < rest.len() {
-            let token = rest[index];
+        while index < completed.len() {
+            let token = completed[index];
             if !token.starts_with('-') {
-                return (index == rest.len() - 1 && !self.ends_with_space).then_some(token);
+                // The positional path was already provided earlier in the line.
+                return None;
             }
 
-            if token.split_once('=').is_some() {
+            if token.contains('=') {
                 index += 1;
-                continue;
-            }
-
-            if update_option_takes_value(token) {
-                if index + 1 >= rest.len() {
-                    return None;
-                }
+            } else if upload_option_takes_value(token) {
                 index += 2;
             } else {
                 index += 1;
             }
         }
 
-        Some("")
+        // The last completed option consumes `current` as its value, so the
+        // cursor is not on the path argument.
+        if index > completed.len() {
+            return None;
+        }
+
+        Some(current)
+    }
+
+    fn simple_target_name_prefix(&self, rest: &[&'a str]) -> Option<&'a str> {
+        match rest {
+            // No name token yet: only offer names once the subcommand word is
+            // finished with a space; otherwise the cursor is still on the
+            // subcommand and completing here would overwrite it.
+            [] => self.ends_with_space.then_some(""),
+            [name] if !self.ends_with_space => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Prefix of the positional target name for subcommands where it can appear
+    /// among options (`add`, `update`).
+    fn positional_target_name_prefix(&self, rest: &[&'a str]) -> Option<&'a str> {
+        // No tokens after the subcommand yet: only a trailing space means the
+        // cursor has moved off the subcommand word onto the name slot.
+        if rest.is_empty() {
+            return self.ends_with_space.then_some("");
+        }
+
+        let (completed, current) = if self.ends_with_space {
+            (rest, "")
+        } else {
+            let (last, head) = rest.split_last().expect("rest is non-empty");
+            (head, *last)
+        };
+
+        // The cursor is on an option being typed, not the positional name.
+        if current.starts_with('-') {
+            return None;
+        }
+
+        let mut index = 0;
+        while index < completed.len() {
+            let token = completed[index];
+            if !token.starts_with('-') {
+                // A positional name was already provided earlier in the line.
+                return None;
+            }
+
+            if token.contains('=') {
+                index += 1;
+            } else if target_option_takes_value(token) {
+                index += 2;
+            } else {
+                index += 1;
+            }
+        }
+
+        // The last completed option consumes `current` as its value, so the
+        // cursor is on that value rather than the name.
+        if index > completed.len() {
+            return None;
+        }
+
+        Some(current)
     }
 }
 
-fn update_option_takes_value(option: &str) -> bool {
+fn target_option_takes_value(option: &str) -> bool {
     matches!(
         option,
         "--provider"
@@ -401,9 +644,14 @@ fn update_option_takes_value(option: &str) -> bool {
             | "--endpoint"
             | "--region"
             | "--public-base-url"
+            | "--folder"
             | "--access-key-id"
             | "--secret-access-key"
     )
+}
+
+fn upload_option_takes_value(option: &str) -> bool {
+    matches!(option, "--target" | "--folder" | "--prefix" | "--name")
 }
 
 #[cfg(test)]
@@ -414,10 +662,17 @@ mod tests {
         vec!["cf-wiki-bucket-apac".to_string(), "r2-blog".to_string()]
     }
 
+    fn catalog(active: &[String]) -> TargetCatalog<'_> {
+        TargetCatalog {
+            active,
+            drafts: &[],
+        }
+    }
+
     #[test]
     fn hints_target_subcommands_after_complete_target_command() {
         assert_eq!(
-            hint("target", &targets()).unwrap(),
+            hint("target", catalog(&targets())).unwrap(),
             "hint: add | update | list | use | remove"
         );
     }
@@ -425,20 +680,23 @@ mod tests {
     #[test]
     fn completes_unique_root_command_prefix() {
         assert_eq!(
-            complete("tar", &targets()),
+            complete("tar", catalog(&targets())),
             CompletionResult::Insert("target ".to_string())
         );
     }
 
     #[test]
     fn offers_matching_target_subcommands() {
-        assert_eq!(hint("target u", &targets()).unwrap(), "hint: update | use");
+        assert_eq!(
+            hint("target u", catalog(&targets())).unwrap(),
+            "hint: update | use"
+        );
     }
 
     #[test]
     fn completes_target_name_for_update() {
         assert_eq!(
-            complete("target update cf", &targets()),
+            complete("target update cf", catalog(&targets())),
             CompletionResult::Insert("target update cf-wiki-bucket-apac ".to_string())
         );
     }
@@ -446,17 +704,18 @@ mod tests {
     #[test]
     fn completes_upload_target_option_value() {
         assert_eq!(
-            complete("upload ./a.png --target cf", &targets()),
+            complete("upload ./a.png --target cf", catalog(&targets())),
             CompletionResult::Insert("upload ./a.png --target cf-wiki-bucket-apac ".to_string())
         );
     }
 
     #[test]
     fn omits_options_that_are_already_present() {
-        let suggestions = suggestions_for_line(r#"target add --provider="xxxx" --"#, &targets())
-            .into_iter()
-            .map(|suggestion| suggestion.value)
-            .collect::<Vec<_>>();
+        let suggestions =
+            suggestions_for_line(r#"target add --provider="xxxx" --"#, catalog(&targets()))
+                .into_iter()
+                .map(|suggestion| suggestion.value)
+                .collect::<Vec<_>>();
 
         assert!(!suggestions.contains(&"--provider".to_string()));
         assert!(suggestions.contains(&"--bucket".to_string()));
@@ -465,12 +724,175 @@ mod tests {
 
     #[test]
     fn omits_upload_options_that_are_already_present() {
-        let suggestions = suggestions_for_line("upload ./a.png --markdown --", &targets())
+        let suggestions = suggestions_for_line("upload ./a.png --markdown --", catalog(&targets()))
             .into_iter()
             .map(|suggestion| suggestion.value)
             .collect::<Vec<_>>();
 
         assert!(!suggestions.contains(&"--markdown".to_string()));
         assert!(suggestions.contains(&"--target".to_string()));
+    }
+
+    #[test]
+    fn use_hint_excludes_draft_targets() {
+        let active = vec!["cf-wiki-bucket-apac".to_string()];
+        let drafts = vec!["eavetest1".to_string()];
+        let catalog = TargetCatalog {
+            active: &active,
+            drafts: &drafts,
+        };
+
+        assert_eq!(
+            hint("target use ", catalog).unwrap(),
+            "hint: cf-wiki-bucket-apac"
+        );
+    }
+
+    #[test]
+    fn remove_hint_marks_draft_targets() {
+        let active = vec!["cf-wiki-bucket-apac".to_string()];
+        let drafts = vec!["eavetest1".to_string()];
+        let catalog = TargetCatalog {
+            active: &active,
+            drafts: &drafts,
+        };
+
+        assert_eq!(
+            hint("target remove ", catalog).unwrap(),
+            format!("hint: cf-wiki-bucket-apac | eavetest1 {}", draft_marker())
+        );
+    }
+
+    fn draft_marker() -> String {
+        i18n::t("completion-draft-marker")
+    }
+
+    #[test]
+    fn update_hint_marks_draft_targets() {
+        let active = vec!["cf-wiki-bucket-apac".to_string()];
+        let drafts = vec!["eavetest1".to_string()];
+        let catalog = TargetCatalog {
+            active: &active,
+            drafts: &drafts,
+        };
+
+        assert_eq!(
+            hint("target update ", catalog).unwrap(),
+            format!("hint: cf-wiki-bucket-apac | eavetest1 {}", draft_marker())
+        );
+    }
+
+    #[test]
+    fn add_hint_lists_only_marked_draft_targets() {
+        let active = vec!["cf-wiki-bucket-apac".to_string()];
+        let drafts = vec!["eavetest1".to_string()];
+        let catalog = TargetCatalog {
+            active: &active,
+            drafts: &drafts,
+        };
+
+        assert_eq!(
+            hint("target add ", catalog).unwrap(),
+            format!("hint: eavetest1 {}", draft_marker())
+        );
+    }
+
+    #[test]
+    fn tab_on_complete_subcommand_appends_space_instead_of_replacing() {
+        // Regression: `target use` (no trailing space) + Tab must not overwrite
+        // the `use` subcommand with a target name.
+        assert_eq!(
+            complete("target use", catalog(&targets())),
+            CompletionResult::Insert("target use ".to_string())
+        );
+        assert_eq!(
+            complete("target remove", catalog(&targets())),
+            CompletionResult::Insert("target remove ".to_string())
+        );
+        assert_eq!(
+            complete("target update", catalog(&targets())),
+            CompletionResult::Insert("target update ".to_string())
+        );
+    }
+
+    #[test]
+    fn tab_after_subcommand_space_completes_target_name() {
+        let active = vec!["cf-wiki-bucket-apac".to_string()];
+
+        assert_eq!(
+            complete("target use ", catalog(&active)),
+            CompletionResult::Insert("target use cf-wiki-bucket-apac ".to_string())
+        );
+    }
+
+    #[test]
+    fn add_completes_resumable_draft_name() {
+        let active = vec!["cf-wiki-bucket-apac".to_string()];
+        let drafts = vec!["eavetest1".to_string()];
+        let catalog = TargetCatalog {
+            active: &active,
+            drafts: &drafts,
+        };
+
+        assert_eq!(
+            complete("target add eave", catalog),
+            CompletionResult::Insert("target add eavetest1 ".to_string())
+        );
+    }
+
+    #[test]
+    fn splits_path_prefix_into_dir_and_file() {
+        assert_eq!(split_path_prefix("./src/ma"), ("./src/", "ma"));
+        assert_eq!(split_path_prefix("ma"), ("", "ma"));
+        assert_eq!(split_path_prefix("dir/"), ("dir/", ""));
+    }
+
+    #[test]
+    fn builds_path_suggestions_with_directory_markers() {
+        let entries = vec![
+            ("main.rs".to_string(), false),
+            ("nested".to_string(), true),
+            (".hidden".to_string(), false),
+        ];
+
+        let suggestions = build_path_suggestions("./src/", "", entries.into_iter());
+        let values = suggestions
+            .iter()
+            .map(|suggestion| suggestion.value.clone())
+            .collect::<Vec<_>>();
+
+        assert!(values.contains(&"./src/main.rs".to_string()));
+        assert!(values.contains(&"./src/nested/".to_string()));
+        assert!(!values.iter().any(|value| value.contains(".hidden")));
+        assert!(
+            suggestions
+                .iter()
+                .find(|suggestion| suggestion.value == "./src/nested/")
+                .is_some_and(|suggestion| !suggestion.append_space)
+        );
+    }
+
+    #[test]
+    fn detects_upload_path_positional() {
+        assert_eq!(
+            CompletionContext::new("upload ./co").upload_path_prefix(),
+            Some("./co")
+        );
+        assert_eq!(
+            CompletionContext::new("upload --target r2 ").upload_path_prefix(),
+            Some("")
+        );
+        assert_eq!(
+            CompletionContext::new("upload cover.png ").upload_path_prefix(),
+            None
+        );
+        assert_eq!(
+            CompletionContext::new("upload cover.png --tar").upload_path_prefix(),
+            None
+        );
+        assert_eq!(
+            CompletionContext::new("upload --folder posts").upload_path_prefix(),
+            None
+        );
     }
 }

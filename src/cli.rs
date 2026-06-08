@@ -133,8 +133,8 @@ pub struct UploadCommand {
     pub folder: Option<String>,
     #[arg(long)]
     pub name: Option<String>,
-    #[arg(long)]
-    pub recursive: bool,
+    #[arg(long, alias = "no-target-folder")]
+    pub ignore_target_folder: bool,
     #[arg(long)]
     pub markdown: bool,
     #[arg(long)]
