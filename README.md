@@ -192,6 +192,22 @@ filelift checks GitHub for a newer release at most once a day (only from an
 interactive terminal) and prints a one-line notice when an update is available.
 Set `FILELIFT_NO_UPDATE_CHECK=1` to disable this check.
 
+### Install channels and PATH
+
+filelift can be installed two ways, and `filelift upgrade` follows the channel
+the running binary came from:
+
+- **Prebuilt (install script)** → installs to the user dir above. `upgrade`
+  re-runs the install script.
+- **`cargo install`** → installs to `~/.cargo/bin`. `upgrade` runs
+  `cargo install filelift --force` (on Windows it prints the command, because a
+  running `.exe` cannot replace itself).
+
+If you have both, the one earlier on `PATH` wins (commonly `~/.cargo/bin`). The
+install script warns you when a different copy will shadow what it just
+installed. Run `where filelift` (Windows) or `which -a filelift` (Unix) to see
+which copy is active.
+
 ## Diagnostic logs
 
 filelift can write encrypted diagnostic logs to

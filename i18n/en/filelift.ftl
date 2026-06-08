@@ -97,3 +97,5 @@ upgrade-succeeded = filelift updated successfully.
 upgrade-failed = The installer exited with an error; filelift was not updated.
 upgrade-spawn-failed = Could not run the installer (`{ $program }`); make sure it is available.
 upgrade-unsupported-os = Automatic upgrade is not supported on this platform ({ $os }); reinstall from the README instructions.
+upgrade-via-cargo = Detected a cargo-managed install; upgrading with `cargo install`...
+upgrade-cargo-manual = filelift was installed with cargo. Run `{ $command }` in a new shell to upgrade (the running binary cannot replace itself on Windows).

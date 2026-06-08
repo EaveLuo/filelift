@@ -118,7 +118,24 @@ try {
     Add-UserPath -PathToAdd $InstallDir
 
     Write-Host "Installed to $InstalledPath"
-    filelift --version
+
+    # Warn if another filelift earlier on PATH (for example a `cargo install`
+    # copy in ~\.cargo\bin) will shadow the binary we just installed, so the user
+    # is not surprised by an unchanged version.
+    $resolved = (Get-Command filelift -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+    if ($resolved -and ($resolved -ne $InstalledPath)) {
+        Write-Warning "Another filelift is earlier on your PATH and will be used instead of this install:"
+        Write-Host "  in use:    $resolved"
+        Write-Host "  installed: $InstalledPath"
+        if ($resolved -like "*\.cargo\bin\*") {
+            Write-Host "  That copy was installed with cargo. Upgrade it with: cargo install filelift --force"
+        }
+        else {
+            Write-Host "  Remove it or reorder PATH so $InstallDir comes first."
+        }
+    }
+
+    & $InstalledPath --version
 }
 finally {
     if (Test-Path $TempDir) {

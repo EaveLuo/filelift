@@ -162,6 +162,15 @@ filelift upgrade --version v0.3.0
 
 filelift 每天最多向 GitHub 检查一次新版本（仅在交互式终端中），有更新时打印一行提示。设置 `FILELIFT_NO_UPDATE_CHECK=1` 可关闭该检查。
 
+### 安装渠道与 PATH 优先级
+
+filelift 有两种安装方式，`filelift upgrade` 会沿用当前运行二进制所属的渠道：
+
+- **预编译（安装脚本）** → 安装到上文的用户目录。`upgrade` 会重新运行安装脚本。
+- **`cargo install`** → 安装到 `~/.cargo/bin`。`upgrade` 会运行 `cargo install filelift --force`（Windows 下因正在运行的 `.exe` 无法自我替换，会改为打印该命令让你手动执行）。
+
+如果两种都装了，PATH 中靠前的那个生效（通常是 `~/.cargo/bin`）。当安装脚本发现刚装的版本会被另一份遮蔽时会给出警告。用 `where filelift`（Windows）或 `which -a filelift`（Unix）可查看当前生效的是哪一份。
+
 ## 诊断日志
 
 filelift 可将加密诊断日志写入 `~/.filelift/logs/events.log.enc`。日志加密密钥保存在加密的密钥存储中。排障时可导出为可读的 JSONL：

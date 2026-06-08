@@ -13,7 +13,9 @@ fn unix_installer_uses_user_bin_and_release_assets() {
     assert!(script.contains("$HOME/.zshrc"));
     assert!(script.contains("Installing or updating filelift"));
     assert!(script.contains("cp -f"));
-    assert!(script.contains("filelift --version"));
+    assert!(script.contains("\"$INSTALL_DIR/$BINARY_NAME\" --version"));
+    assert!(script.contains("another filelift is earlier on your PATH"));
+    assert!(script.contains("cargo install filelift --force"));
 }
 
 #[test]
@@ -28,7 +30,9 @@ fn windows_installer_uses_user_path_and_release_assets() {
     assert!(script.contains("x86_64-pc-windows-msvc"));
     assert!(script.contains("SetEnvironmentVariable(\"Path\""));
     assert!(script.contains("User)"));
-    assert!(script.contains("filelift --version"));
+    assert!(script.contains("& $InstalledPath --version"));
+    assert!(script.contains("Another filelift is earlier on your PATH"));
+    assert!(script.contains("cargo install filelift --force"));
 }
 
 #[test]
