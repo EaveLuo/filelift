@@ -93,7 +93,7 @@ filelift upload ./assets --folder blog/2026/my-post
 
 | Command | Description |
 | --- | --- |
-| `filelift upload <path>` | Upload a file or directory and print URLs. |
+| `filelift upload <path>...` | Upload one or more files or directories and print URLs. |
 | `filelift target add <name>` | Register a new upload target. |
 | `filelift target update [name]` | Update an existing target. |
 | `filelift target list` | List configured targets. |

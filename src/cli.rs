@@ -13,7 +13,7 @@ pub enum Commands {
     #[command(about = "Manage upload targets")]
     #[command(subcommand)]
     Target(TargetCommands),
-    #[command(about = "Upload a file or directory")]
+    #[command(about = "Upload one or more files or directories")]
     Upload(UploadCommand),
     #[command(about = "Materialize stored credentials for injection")]
     #[command(subcommand)]
@@ -184,7 +184,9 @@ pub struct TargetRemoveCommand {
 
 #[derive(Debug, Args)]
 pub struct UploadCommand {
-    pub path: Utf8PathBuf,
+    /// Files or directories to upload (one or more).
+    #[arg(required = true, num_args = 1.., value_name = "PATH")]
+    pub paths: Vec<Utf8PathBuf>,
     #[arg(long)]
     pub target: Option<String>,
     #[arg(long, alias = "prefix")]
