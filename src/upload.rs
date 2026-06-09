@@ -513,7 +513,8 @@ mod tests {
         fs::write(&file_path, "image").unwrap();
         let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
 
-        let items = plan_uploads(std::slice::from_ref(&file_path), Some("blog/post"), None).unwrap();
+        let items =
+            plan_uploads(std::slice::from_ref(&file_path), Some("blog/post"), None).unwrap();
 
         assert_eq!(
             items,
@@ -712,7 +713,10 @@ mod tests {
 
     #[test]
     fn dedupe_drops_exact_duplicates() {
-        let items = vec![item("a/cover.png", "cover.png"), item("a/cover.png", "cover.png")];
+        let items = vec![
+            item("a/cover.png", "cover.png"),
+            item("a/cover.png", "cover.png"),
+        ];
 
         let result = dedupe_and_disambiguate(items);
 
@@ -729,7 +733,10 @@ mod tests {
         ];
 
         let result = dedupe_and_disambiguate(items);
-        let keys = result.iter().map(|item| item.key.clone()).collect::<Vec<_>>();
+        let keys = result
+            .iter()
+            .map(|item| item.key.clone())
+            .collect::<Vec<_>>();
 
         assert_eq!(
             keys,
@@ -764,8 +771,14 @@ mod tests {
 
     #[test]
     fn splits_key_extension_for_suffixing() {
-        assert_eq!(split_key_extension("blog/logo.png"), ("blog/logo", Some("png")));
-        assert_eq!(split_key_extension("archive.tar.gz"), ("archive.tar", Some("gz")));
+        assert_eq!(
+            split_key_extension("blog/logo.png"),
+            ("blog/logo", Some("png"))
+        );
+        assert_eq!(
+            split_key_extension("archive.tar.gz"),
+            ("archive.tar", Some("gz"))
+        );
         assert_eq!(split_key_extension("README"), ("README", None));
         assert_eq!(split_key_extension("dir/.hidden"), ("dir/.hidden", None));
     }

@@ -826,7 +826,10 @@ mod tests {
 
         assert_eq!(
             hint("target remove ", catalog).unwrap(),
-            hint_prefix(&format!("cf-wiki-bucket-apac | eavetest1 {}", draft_marker()))
+            hint_prefix(&format!(
+                "cf-wiki-bucket-apac | eavetest1 {}",
+                draft_marker()
+            ))
         );
     }
 
@@ -849,7 +852,10 @@ mod tests {
 
         assert_eq!(
             hint("target update ", catalog).unwrap(),
-            hint_prefix(&format!("cf-wiki-bucket-apac | eavetest1 {}", draft_marker()))
+            hint_prefix(&format!(
+                "cf-wiki-bucket-apac | eavetest1 {}",
+                draft_marker()
+            ))
         );
     }
 
@@ -1000,10 +1006,7 @@ mod tests {
         assert_eq!(upload_positional_count(&["cover.png"]), 1);
         assert_eq!(upload_positional_count(&["cover.png", "banner.png"]), 2);
         assert_eq!(upload_positional_count(&["--target", "r2"]), 0);
-        assert_eq!(
-            upload_positional_count(&["--target", "r2", "cover.png"]),
-            1
-        );
+        assert_eq!(upload_positional_count(&["--target", "r2", "cover.png"]), 1);
         assert_eq!(upload_positional_count(&["--markdown", "cover.png"]), 1);
     }
 }
