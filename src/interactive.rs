@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{self, IsTerminal, Write},
     process::Command,
@@ -125,6 +125,14 @@ pub fn parse_interactive_line(line: &str) -> Result<Vec<String>> {
 
 pub fn idle_hint(line: &str, catalog: TargetCatalog<'_>) -> Option<String> {
     interactive_completion::hint(line, catalog)
+}
+
+/// Appends a fixed `Tab` affordance to a dynamic hint so the contextual list
+/// still shows while also nudging users toward Tab completion (which can do
+/// everything the hint can and more). Kept separate from the hint builder so the
+/// contextual listing and its tests stay untouched.
+fn decorate_hint(hint: &str) -> String {
+    crate::i18n::t_args("completion-hint-decorated", &[("hint", hint)])
 }
 
 pub fn target_selection_request(args: &[&str]) -> Option<TargetSelectionRequest> {
@@ -496,6 +504,15 @@ impl Overlay {
     }
 }
 
+/// Whether a [`CompletionPanel`] accepts a single highlighted row or lets the
+/// user check off several rows before confirming. Multi-select is reserved for
+/// upload path completion, where batching files is the whole point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelMode {
+    SingleSelect,
+    MultiSelect,
+}
+
 /// A completion list shown below the prompt that the user can navigate with the
 /// arrow keys (or Tab) and accept with Enter.
 struct CompletionPanel {
@@ -503,14 +520,44 @@ struct CompletionPanel {
     /// Highlighted row, or `None` while the list is shown purely for reference
     /// and no row has been chosen yet.
     selected: Option<usize>,
+    /// Rows checked off in multi-select mode (always empty in single-select).
+    marked: BTreeSet<usize>,
+    mode: PanelMode,
 }
 
 impl CompletionPanel {
-    fn new(items: Vec<Suggestion>) -> Self {
+    fn new(items: Vec<Suggestion>, mode: PanelMode) -> Self {
         Self {
             items,
             selected: None,
+            marked: BTreeSet::new(),
+            mode,
         }
+    }
+
+    fn is_multi_select(&self) -> bool {
+        self.mode == PanelMode::MultiSelect
+    }
+
+    /// Toggles the checkbox on the highlighted row (multi-select only).
+    fn toggle_mark(&mut self) {
+        if !self.is_multi_select() {
+            return;
+        }
+        let Some(index) = self.selected else {
+            return;
+        };
+        if !self.marked.remove(&index) {
+            self.marked.insert(index);
+        }
+    }
+
+    /// The checked-off suggestions, in display order.
+    fn marked_items(&self) -> Vec<Suggestion> {
+        self.marked
+            .iter()
+            .filter_map(|index| self.items.get(*index).cloned())
+            .collect()
     }
 
     /// Number of rows that can actually be highlighted, which mirrors the number
@@ -747,6 +794,23 @@ impl LineEditor {
                 }
             }
             KeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers,
+                ..
+            } if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && self.mode == InputMode::Insert
+                && self
+                    .overlay
+                    .panel()
+                    .is_some_and(CompletionPanel::is_multi_select) =>
+            {
+                // In a multi-select panel, Space checks rows off instead of being
+                // typed into the line.
+                if let Overlay::Completions(panel) = &mut self.overlay {
+                    panel.toggle_mark();
+                }
+            }
+            KeyEvent {
                 code: KeyCode::Char(ch),
                 modifiers,
                 ..
@@ -779,10 +843,14 @@ impl LineEditor {
             let Some(panel) = self.overlay.panel() else {
                 return false;
             };
-            let Some(item) = panel.selected_item() else {
-                return false;
-            };
-            interactive_completion::apply(&self.input, item)
+            if panel.is_multi_select() && !panel.marked.is_empty() {
+                interactive_completion::apply_many(&self.input, &panel.marked_items())
+            } else {
+                let Some(item) = panel.selected_item() else {
+                    return false;
+                };
+                interactive_completion::apply(&self.input, item)
+            }
         };
         self.input = completed;
         self.cursor = self.input.len();
@@ -805,7 +873,12 @@ impl LineEditor {
                 self.overlay = Overlay::None;
             }
             CompletionResult::Candidates(items) => {
-                self.overlay = Overlay::Completions(CompletionPanel::new(items));
+                let mode = if interactive_completion::is_upload_path_completion(&self.input) {
+                    PanelMode::MultiSelect
+                } else {
+                    PanelMode::SingleSelect
+                };
+                self.overlay = Overlay::Completions(CompletionPanel::new(items, mode));
             }
             CompletionResult::None => self.overlay = Overlay::None,
         }
@@ -958,7 +1031,7 @@ fn read_line(
             && last_edit.elapsed() >= IDLE_HINT_DELAY
             && let Some(hint) = idle_hint(&editor.input, catalog)
         {
-            editor.overlay = Overlay::Hint(hint);
+            editor.overlay = Overlay::Hint(decorate_hint(&hint));
             screen.render(&editor)?;
         }
     }
@@ -1065,17 +1138,22 @@ fn draw_completion_panel(stdout: &mut io::Stdout, panel: &CompletionPanel) -> Re
     let mut rows = 0;
     for (index, suggestion) in panel.items[..shown].iter().enumerate() {
         write!(stdout, "\r\n")?;
+        let checkbox = checkbox_marker(panel, index);
         if panel.selected == Some(index) {
             execute!(
                 stdout,
                 SetBackgroundColor(Color::Cyan),
                 SetForegroundColor(Color::Black)
             )?;
-            write!(stdout, "> {}  {}", suggestion.value, suggestion.description)?;
+            write!(
+                stdout,
+                "> {checkbox}{}  {}",
+                suggestion.value, suggestion.description
+            )?;
             execute!(stdout, ResetColor)?;
         } else {
             execute!(stdout, SetForegroundColor(Color::Cyan))?;
-            write!(stdout, "  {}", suggestion.value)?;
+            write!(stdout, "  {checkbox}{}", suggestion.value)?;
             execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
             write!(stdout, "  {}", suggestion.description)?;
             execute!(stdout, ResetColor)?;
@@ -1089,7 +1167,33 @@ fn draw_completion_panel(stdout: &mut io::Stdout, panel: &CompletionPanel) -> Re
         execute!(stdout, ResetColor)?;
         rows += 1;
     }
+    if panel.is_multi_select() {
+        write!(stdout, "\r\n")?;
+        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        write!(
+            stdout,
+            "  {}",
+            crate::i18n::t_args(
+                "completion-panel-multiselect-hint",
+                &[("count", &panel.marked.len().to_string())],
+            )
+        )?;
+        execute!(stdout, ResetColor)?;
+        rows += 1;
+    }
     Ok(rows)
+}
+
+/// The leading checkbox for a panel row: empty in single-select, `[x]`/`[ ]`
+/// in multi-select depending on whether the row is checked off.
+fn checkbox_marker(panel: &CompletionPanel, index: usize) -> &'static str {
+    if !panel.is_multi_select() {
+        ""
+    } else if panel.marked.contains(&index) {
+        "[x] "
+    } else {
+        "[ ] "
+    }
 }
 
 fn visible_tail(value: &str, max_chars: usize) -> String {
@@ -1368,7 +1472,19 @@ mod tests {
                 draft: false,
             })
             .collect();
-        CompletionPanel::new(items)
+        CompletionPanel::new(items, PanelMode::SingleSelect)
+    }
+
+    fn multi_panel(count: usize) -> CompletionPanel {
+        let items = (0..count)
+            .map(|index| Suggestion {
+                value: format!("file{index}.png"),
+                description: String::new(),
+                append_space: true,
+                draft: false,
+            })
+            .collect();
+        CompletionPanel::new(items, PanelMode::MultiSelect)
     }
 
     #[test]
@@ -1430,12 +1546,15 @@ mod tests {
         let mut editor = LineEditor::new();
         editor.input = "tar".to_string();
         editor.cursor = editor.input.len();
-        editor.overlay = Overlay::Completions(CompletionPanel::new(vec![Suggestion {
-            value: "target".to_string(),
-            description: String::new(),
-            append_space: true,
-            draft: false,
-        }]));
+        editor.overlay = Overlay::Completions(CompletionPanel::new(
+            vec![Suggestion {
+                value: "target".to_string(),
+                description: String::new(),
+                append_space: true,
+                draft: false,
+            }],
+            PanelMode::SingleSelect,
+        ));
         if let Overlay::Completions(panel) = &mut editor.overlay {
             panel.select_next();
         }
@@ -1511,6 +1630,107 @@ mod tests {
     }
 
     #[test]
+    fn space_toggles_marks_in_a_multi_select_panel() {
+        let catalog = TargetCatalog {
+            active: &[],
+            drafts: &[],
+        };
+        let mut editor = LineEditor::new();
+        editor.input = "upload ".to_string();
+        editor.cursor = editor.input.len();
+        editor.overlay = Overlay::Completions(multi_panel(3));
+
+        let mut edited = false;
+        // Highlight the first row, then check it off with Space.
+        editor.handle_key(press(KeyCode::Down), catalog, &[], &mut edited);
+        editor.handle_key(press(KeyCode::Char(' ')), catalog, &[], &mut edited);
+        // Space must not be typed into the input while marking.
+        assert_eq!(editor.input, "upload ");
+        let panel = editor.overlay.panel().unwrap();
+        assert!(panel.marked.contains(&0));
+
+        // Move down and mark the second row too.
+        editor.handle_key(press(KeyCode::Down), catalog, &[], &mut edited);
+        editor.handle_key(press(KeyCode::Char(' ')), catalog, &[], &mut edited);
+        let panel = editor.overlay.panel().unwrap();
+        assert!(panel.marked.contains(&0));
+        assert!(panel.marked.contains(&1));
+    }
+
+    #[test]
+    fn enter_inserts_all_marked_paths_from_multi_select_panel() {
+        let catalog = TargetCatalog {
+            active: &[],
+            drafts: &[],
+        };
+        let mut editor = LineEditor::new();
+        editor.input = "upload ".to_string();
+        editor.cursor = editor.input.len();
+        editor.overlay = Overlay::Completions(multi_panel(3));
+
+        let mut edited = false;
+        editor.handle_key(press(KeyCode::Down), catalog, &[], &mut edited); // row 0
+        editor.handle_key(press(KeyCode::Char(' ')), catalog, &[], &mut edited);
+        editor.handle_key(press(KeyCode::Down), catalog, &[], &mut edited); // row 1
+        editor.handle_key(press(KeyCode::Char(' ')), catalog, &[], &mut edited);
+
+        let flow = editor.handle_key(press(KeyCode::Enter), catalog, &[], &mut edited);
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(editor.input, "upload file0.png file1.png ");
+        assert!(editor.overlay.is_none());
+    }
+
+    #[test]
+    fn enter_with_no_marks_falls_back_to_highlighted_row() {
+        let catalog = TargetCatalog {
+            active: &[],
+            drafts: &[],
+        };
+        let mut editor = LineEditor::new();
+        editor.input = "upload ".to_string();
+        editor.cursor = editor.input.len();
+        editor.overlay = Overlay::Completions(multi_panel(3));
+
+        let mut edited = false;
+        editor.handle_key(press(KeyCode::Down), catalog, &[], &mut edited); // highlight row 0
+        editor.handle_key(press(KeyCode::Enter), catalog, &[], &mut edited);
+
+        assert_eq!(editor.input, "upload file0.png ");
+        assert!(editor.overlay.is_none());
+    }
+
+    #[test]
+    fn space_is_typed_normally_without_a_multi_select_panel() {
+        let catalog = TargetCatalog {
+            active: &[],
+            drafts: &[],
+        };
+        let mut editor = LineEditor::new();
+        editor.input = "upload".to_string();
+        editor.cursor = editor.input.len();
+
+        let mut edited = false;
+        editor.handle_key(press(KeyCode::Char(' ')), catalog, &[], &mut edited);
+        assert_eq!(editor.input, "upload ");
+        assert!(edited);
+    }
+
+    #[test]
+    fn decorate_hint_keeps_dynamic_list_and_adds_tab_affordance() {
+        let decorated = decorate_hint("hint: add | update | list | use | remove");
+
+        assert!(decorated.starts_with("hint: add | update | list | use | remove"));
+        assert!(decorated.len() > "hint: add | update | list | use | remove".len());
+        assert_eq!(
+            decorated,
+            crate::i18n::t_args(
+                "completion-hint-decorated",
+                &[("hint", "hint: add | update | list | use | remove")]
+            )
+        );
+    }
+
+    #[test]
     fn parses_quoted_interactive_command_like_a_shell() {
         let args = parse_interactive_line("target update \"r2 blog\" --bucket assets").unwrap();
 
@@ -1530,7 +1750,10 @@ mod tests {
 
         assert_eq!(
             idle_hint("target update ", catalog).unwrap(),
-            "hint: assets-cdn | r2-blog"
+            crate::i18n::t_args(
+                "completion-hint-prefix",
+                &[("suggestions", "assets-cdn | r2-blog")]
+            )
         );
     }
 

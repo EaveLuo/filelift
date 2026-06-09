@@ -96,6 +96,12 @@ impl TargetNameScope {
 }
 
 pub fn hint(line: &str, catalog: TargetCatalog<'_>) -> Option<String> {
+    // Once at least one upload path is chosen, a flat file list is less useful
+    // than telling the user what they can do next.
+    if CompletionContext::new(line).upload_awaiting_more_paths() {
+        return Some(i18n::t("completion-upload-more-paths"));
+    }
+
     let suggestions = suggestions_for_line(line, catalog);
     if suggestions.is_empty() {
         return None;
@@ -112,14 +118,15 @@ pub fn hint(line: &str, catalog: TargetCatalog<'_>) -> Option<String> {
         return None;
     }
 
-    Some(format!(
-        "hint: {}",
-        suggestions
-            .iter()
-            .take(5)
-            .map(Suggestion::hint_label)
-            .collect::<Vec<_>>()
-            .join(" | ")
+    let suggestions_str = suggestions
+        .iter()
+        .take(5)
+        .map(Suggestion::hint_label)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Some(i18n::t_args(
+        "completion-hint-prefix",
+        &[("suggestions", &suggestions_str)],
     ))
 }
 
@@ -364,6 +371,29 @@ pub fn apply(line: &str, suggestion: &Suggestion) -> String {
     apply_suggestion(line, suggestion)
 }
 
+/// Applies several chosen suggestions at once, replacing the in-progress word
+/// with the first value and appending the rest space-separated. Used when the
+/// interactive multi-select panel confirms a batch of upload paths.
+pub fn apply_many(line: &str, suggestions: &[Suggestion]) -> String {
+    let Some((first, rest)) = suggestions.split_first() else {
+        return line.to_string();
+    };
+    let mut completed = apply_suggestion(line, first);
+    for suggestion in rest {
+        completed.push_str(&suggestion.value);
+        if suggestion.append_space && !completed.ends_with(' ') {
+            completed.push(' ');
+        }
+    }
+    completed
+}
+
+/// Whether the cursor on `line` is completing an `upload` positional path, which
+/// is the only context where the interactive panel offers multi-selection.
+pub fn is_upload_path_completion(line: &str) -> bool {
+    CompletionContext::new(line).upload_path_prefix().is_some()
+}
+
 fn apply_suggestion(line: &str, suggestion: &Suggestion) -> String {
     let prefix_start = current_prefix_start(line);
     let mut completed = line[..prefix_start].to_string();
@@ -556,8 +586,10 @@ impl<'a> CompletionContext<'a> {
         while index < completed.len() {
             let token = completed[index];
             if !token.starts_with('-') {
-                // The positional path was already provided earlier in the line.
-                return None;
+                // A positional path; `upload` accepts more than one, so keep
+                // scanning instead of bailing out here.
+                index += 1;
+                continue;
             }
 
             if token.contains('=') {
@@ -576,6 +608,19 @@ impl<'a> CompletionContext<'a> {
         }
 
         Some(current)
+    }
+
+    /// Whether the cursor sits on a fresh `upload` path slot (trailing space)
+    /// with at least one path already provided, so the idle hint can nudge the
+    /// user toward adding more files, switching to options, or uploading.
+    fn upload_awaiting_more_paths(&self) -> bool {
+        if !self.ends_with_space || self.upload_path_prefix() != Some("") {
+            return false;
+        }
+        let ["upload", rest @ ..] = self.words.as_slice() else {
+            return false;
+        };
+        upload_positional_count(rest) >= 1
     }
 
     fn simple_target_name_prefix(&self, rest: &[&'a str]) -> Option<&'a str> {
@@ -655,6 +700,27 @@ fn upload_option_takes_value(option: &str) -> bool {
     matches!(option, "--target" | "--folder" | "--prefix" | "--name")
 }
 
+/// Counts the positional path arguments among `upload`'s already-completed
+/// tokens, skipping options and the values they consume.
+fn upload_positional_count(completed: &[&str]) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < completed.len() {
+        let token = completed[index];
+        if !token.starts_with('-') {
+            count += 1;
+            index += 1;
+        } else if token.contains('=') {
+            index += 1;
+        } else if upload_option_takes_value(token) {
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,7 +740,7 @@ mod tests {
     fn hints_target_subcommands_after_complete_target_command() {
         assert_eq!(
             hint("target", catalog(&targets())).unwrap(),
-            "hint: add | update | list | use | remove"
+            hint_prefix("add | update | list | use | remove")
         );
     }
 
@@ -690,7 +756,7 @@ mod tests {
     fn offers_matching_target_subcommands() {
         assert_eq!(
             hint("target u", catalog(&targets())).unwrap(),
-            "hint: update | use"
+            hint_prefix("update | use")
         );
     }
 
@@ -745,7 +811,7 @@ mod tests {
 
         assert_eq!(
             hint("target use ", catalog).unwrap(),
-            "hint: cf-wiki-bucket-apac"
+            hint_prefix("cf-wiki-bucket-apac")
         );
     }
 
@@ -760,8 +826,12 @@ mod tests {
 
         assert_eq!(
             hint("target remove ", catalog).unwrap(),
-            format!("hint: cf-wiki-bucket-apac | eavetest1 {}", draft_marker())
+            hint_prefix(&format!("cf-wiki-bucket-apac | eavetest1 {}", draft_marker()))
         );
+    }
+
+    fn hint_prefix(suggestions: &str) -> String {
+        i18n::t_args("completion-hint-prefix", &[("suggestions", suggestions)])
     }
 
     fn draft_marker() -> String {
@@ -779,7 +849,7 @@ mod tests {
 
         assert_eq!(
             hint("target update ", catalog).unwrap(),
-            format!("hint: cf-wiki-bucket-apac | eavetest1 {}", draft_marker())
+            hint_prefix(&format!("cf-wiki-bucket-apac | eavetest1 {}", draft_marker()))
         );
     }
 
@@ -794,7 +864,7 @@ mod tests {
 
         assert_eq!(
             hint("target add ", catalog).unwrap(),
-            format!("hint: eavetest1 {}", draft_marker())
+            hint_prefix(&format!("eavetest1 {}", draft_marker()))
         );
     }
 
@@ -885,7 +955,11 @@ mod tests {
         );
         assert_eq!(
             CompletionContext::new("upload cover.png ").upload_path_prefix(),
-            None
+            Some("")
+        );
+        assert_eq!(
+            CompletionContext::new("upload cover.png banner").upload_path_prefix(),
+            Some("banner")
         );
         assert_eq!(
             CompletionContext::new("upload cover.png --tar").upload_path_prefix(),
@@ -895,5 +969,41 @@ mod tests {
             CompletionContext::new("upload --folder posts").upload_path_prefix(),
             None
         );
+    }
+
+    #[test]
+    fn completes_additional_upload_paths() {
+        let suggestions = suggestions_for_line("upload src/ma", catalog(&targets()))
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+        assert!(suggestions.iter().any(|value| value == "src/main.rs"));
+
+        // A second positional path is still completed against the filesystem.
+        let suggestions = suggestions_for_line("upload Cargo.toml src/ma", catalog(&targets()))
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+        assert!(suggestions.iter().any(|value| value == "src/main.rs"));
+    }
+
+    #[test]
+    fn hints_more_paths_after_first_upload_path() {
+        assert_eq!(
+            hint("upload cover.png ", catalog(&targets())).unwrap(),
+            i18n::t("completion-upload-more-paths")
+        );
+    }
+
+    #[test]
+    fn counts_upload_positionals_ignoring_options() {
+        assert_eq!(upload_positional_count(&["cover.png"]), 1);
+        assert_eq!(upload_positional_count(&["cover.png", "banner.png"]), 2);
+        assert_eq!(upload_positional_count(&["--target", "r2"]), 0);
+        assert_eq!(
+            upload_positional_count(&["--target", "r2", "cover.png"]),
+            1
+        );
+        assert_eq!(upload_positional_count(&["--markdown", "cover.png"]), 1);
     }
 }

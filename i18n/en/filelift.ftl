@@ -1,6 +1,6 @@
 cli-about = A small CLI for lifting local files to S3-compatible object storage.
 cmd-target-about = Manage upload targets
-cmd-upload-about = Upload a file or directory
+cmd-upload-about = Upload one or more files or directories
 cmd-log-about = Manage diagnostic logs
 cmd-language-about = Manage CLI language
 cmd-target-add-about = Add an upload target
@@ -55,6 +55,10 @@ completion-draft-target = draft target (resume to finish)
 completion-draft-marker = (draft)
 completion-path-directory = directory
 completion-path-file = file
+completion-upload-more-paths = add more files · type -- for options · Enter to upload
+completion-panel-multiselect-hint = { $count } selected · Space to toggle · Enter to upload
+completion-hint-prefix = hint: { $suggestions }
+completion-hint-decorated = { $hint }  ·  Tab to complete / see more
 
 prompt-bucket = Bucket
 prompt-provider = Provider
@@ -85,6 +89,9 @@ log-exported = Exported diagnostic log to { $path } ({ $count } events). Review 
 log-cleared = Cleared diagnostic logs.
 
 upload-missing-credentials = Missing credentials for target `{ $target }`; run `filelift target update { $target }` to save access keys.
+upload-name-single-file-only = --name can only be used with a single file input.
+upload-path-not-found = These upload paths do not exist: { $paths }.
+upload-renamed-on-conflict = Renamed to avoid a key collision: { $local } -> { $key }.
 
 credentials-export-missing = No stored credentials for target `{ $target }`; run `filelift target add { $target }` or set the FILELIFT_* environment variables.
 credentials-export-warning = Exported credentials for `{ $target }` as plaintext environment variables. Handle them carefully and prefer scoped, revocable keys for agents.

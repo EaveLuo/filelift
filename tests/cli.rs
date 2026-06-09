@@ -108,7 +108,9 @@ fn root_help_lists_target_and_upload_commands() {
         .stdout(predicate::str::contains("target"))
         .stdout(predicate::str::contains("Manage upload targets"))
         .stdout(predicate::str::contains("upload"))
-        .stdout(predicate::str::contains("Upload a file or directory"))
+        .stdout(predicate::str::contains(
+            "Upload one or more files or directories",
+        ))
         .stdout(predicate::str::contains("language"))
         .stdout(predicate::str::contains("Manage CLI language"));
 }
@@ -160,7 +162,7 @@ fn root_help_uses_saved_chinese_language() {
         .assert()
         .success()
         .stdout(predicate::str::contains("管理上传 target"))
-        .stdout(predicate::str::contains("上传文件或目录"))
+        .stdout(predicate::str::contains("上传一个或多个文件或目录"))
         .stdout(predicate::str::contains("管理 CLI 语言"));
 }
 

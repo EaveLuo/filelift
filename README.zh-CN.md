@@ -79,7 +79,7 @@ filelift upload ./assets --folder blog/2026/my-post
 
 | 命令 | 说明 |
 | --- | --- |
-| `filelift upload <path>` | 上传文件或目录并打印 URL。 |
+| `filelift upload <path>...` | 上传一个或多个文件或目录并打印 URL。 |
 | `filelift target add <name>` | 注册新的上传目标。 |
 | `filelift target update [name]` | 更新已有目标。 |
 | `filelift target list` | 列出已配置的目标。 |

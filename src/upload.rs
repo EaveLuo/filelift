@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -33,9 +34,20 @@ pub async fn run(command: UploadCommand) -> Result<()> {
         command.folder.as_deref(),
         command.ignore_target_folder,
     )?;
-    let items = plan_uploads(&command.path, folder.as_deref(), command.name.as_deref())?;
+    let planned = plan_uploads(&command.paths, folder.as_deref(), command.name.as_deref())?;
+    let items = dedupe_and_disambiguate(planned);
     if items.is_empty() {
         bail!("no files matched upload input");
+    }
+
+    for renamed in items.iter().filter_map(UploadItem::rename_notice) {
+        anstream::eprintln!(
+            "{}",
+            output::warning(&i18n::t_args(
+                "upload-renamed-on-conflict",
+                &[("local", renamed.local), ("key", renamed.key)],
+            ))
+        );
     }
     let upload_count = items.len() as u64;
     tracing::info!(
@@ -210,32 +222,82 @@ fn spawn_upload(
 struct UploadItem {
     local_path: Utf8PathBuf,
     key: String,
+    /// True when this item's key was suffixed to avoid colliding with another
+    /// local file mapping to the same remote key, so the caller can warn that the
+    /// resulting URL differs from the original file name.
+    renamed: bool,
 }
 
+/// Borrowed view of a renamed item, used to render the transparency notice.
+struct RenameNotice<'a> {
+    local: &'a str,
+    key: &'a str,
+}
+
+impl UploadItem {
+    fn rename_notice(&self) -> Option<RenameNotice<'_>> {
+        self.renamed.then_some(RenameNotice {
+            local: self.local_path.as_str(),
+            key: &self.key,
+        })
+    }
+}
+
+/// Plans uploads for one or more inputs (files and/or directories), aggregating
+/// them into a single, deterministically ordered list.
 fn plan_uploads(
-    path: &Utf8Path,
+    paths: &[Utf8PathBuf],
     prefix: Option<&str>,
     name: Option<&str>,
 ) -> Result<Vec<UploadItem>> {
+    if name.is_some() && !(paths.len() == 1 && paths[0].is_file()) {
+        bail!(i18n::t("upload-name-single-file-only"));
+    }
+
+    let missing = paths
+        .iter()
+        .filter(|path| !path.exists())
+        .map(Utf8PathBuf::to_string)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!(i18n::t_args(
+            "upload-path-not-found",
+            &[("paths", &missing.join(", "))],
+        ));
+    }
+
+    let mut items = Vec::new();
+    for path in paths {
+        plan_one(path, prefix, name, &mut items)?;
+    }
+    sort_items(&mut items);
+    Ok(items)
+}
+
+/// Plans a single input. Files map to one item keyed by their (optional renamed)
+/// file name; directories are walked recursively, each rooted at itself so its
+/// internal structure is preserved relative to that input.
+fn plan_one(
+    path: &Utf8Path,
+    prefix: Option<&str>,
+    name: Option<&str>,
+    items: &mut Vec<UploadItem>,
+) -> Result<()> {
     if path.is_file() {
         let filename = name
             .or_else(|| path.file_name())
             .context("could not infer file name")?;
-        return Ok(vec![UploadItem {
+        items.push(UploadItem {
             local_path: path.to_path_buf(),
             key: join_key(prefix, filename),
-        }]);
+            renamed: false,
+        });
+        return Ok(());
     }
 
     if path.is_dir() {
-        if name.is_some() {
-            bail!("--name can only be used with a single file");
-        }
-
-        let mut items = Vec::new();
-        collect_directory(path, path, prefix, &mut items)?;
-        items.sort_by(|left, right| left.key.cmp(&right.key));
-        return Ok(items);
+        collect_directory(path, path, prefix, items)?;
+        return Ok(());
     }
 
     bail!("path does not exist: {path}")
@@ -263,10 +325,74 @@ fn collect_directory(
             items.push(UploadItem {
                 local_path: path,
                 key,
+                renamed: false,
             });
         }
     }
     Ok(())
+}
+
+fn sort_items(items: &mut [UploadItem]) {
+    items.sort_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then_with(|| left.local_path.cmp(&right.local_path))
+    });
+}
+
+/// Drops exact duplicates (same local file and key) and gives every remaining
+/// key collision a unique suffixed key (`name-1.ext`, `name-2.ext`, ...), so two
+/// distinct local files never silently overwrite each other on the remote.
+fn dedupe_and_disambiguate(items: Vec<UploadItem>) -> Vec<UploadItem> {
+    let mut items = items;
+    sort_items(&mut items);
+    items.dedup();
+
+    let mut used: HashSet<String> = HashSet::new();
+    let mut result = Vec::with_capacity(items.len());
+    for mut item in items {
+        if used.insert(item.key.clone()) {
+            result.push(item);
+            continue;
+        }
+
+        let unique_key = next_available_key(&item.key, &used);
+        used.insert(unique_key.clone());
+        item.key = unique_key;
+        item.renamed = true;
+        result.push(item);
+    }
+    result
+}
+
+fn next_available_key(key: &str, used: &HashSet<String>) -> String {
+    let (stem, extension) = split_key_extension(key);
+    let mut suffix = 1;
+    loop {
+        let candidate = match extension {
+            Some(extension) => format!("{stem}-{suffix}.{extension}"),
+            None => format!("{stem}-{suffix}"),
+        };
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+/// Splits a key into its stem and extension, considering only the final path
+/// segment so directory separators are never mistaken for extension dots. A
+/// leading dot (dotfile) is treated as part of the stem, not an extension.
+fn split_key_extension(key: &str) -> (&str, Option<&str>) {
+    let segment_start = key.rfind('/').map(|index| index + 1).unwrap_or(0);
+    let segment = &key[segment_start..];
+    match segment.rfind('.') {
+        Some(dot) if dot > 0 => {
+            let split = segment_start + dot;
+            (&key[..split], Some(&key[split + 1..]))
+        }
+        _ => (key, None),
+    }
 }
 
 fn join_key(prefix: Option<&str>, name: &str) -> String {
@@ -387,13 +513,14 @@ mod tests {
         fs::write(&file_path, "image").unwrap();
         let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
 
-        let items = plan_uploads(&file_path, Some("blog/post"), None).unwrap();
+        let items = plan_uploads(std::slice::from_ref(&file_path), Some("blog/post"), None).unwrap();
 
         assert_eq!(
             items,
             vec![UploadItem {
                 local_path: file_path,
                 key: "blog/post/cover.webp".to_string(),
+                renamed: false,
             }]
         );
     }
@@ -406,7 +533,8 @@ mod tests {
         let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
 
         let folder = resolve_upload_folder(Some("blog"), Some("posts/2026/06/08"), false).unwrap();
-        let items = plan_uploads(&file_path, folder.as_deref(), None).unwrap();
+        let items =
+            plan_uploads(std::slice::from_ref(&file_path), folder.as_deref(), None).unwrap();
 
         assert_eq!(items[0].key, "blog/posts/2026/06/08/cover.webp");
     }
@@ -449,7 +577,12 @@ mod tests {
         fs::write(&file_path, "image").unwrap();
         let file_path = Utf8PathBuf::from_path_buf(file_path).unwrap();
 
-        let items = plan_uploads(&file_path, Some("blog/post"), Some("cover.webp")).unwrap();
+        let items = plan_uploads(
+            std::slice::from_ref(&file_path),
+            Some("blog/post"),
+            Some("cover.webp"),
+        )
+        .unwrap();
 
         assert_eq!(items[0].key, "blog/post/cover.webp");
     }
@@ -459,7 +592,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let dir_path = Utf8PathBuf::from_path_buf(tempdir.path().to_path_buf()).unwrap();
 
-        let error = plan_uploads(&dir_path, None, Some("cover.webp"))
+        let error = plan_uploads(std::slice::from_ref(&dir_path), None, Some("cover.webp"))
             .unwrap_err()
             .to_string();
 
@@ -475,7 +608,7 @@ mod tests {
         fs::write(nested.join("demo.mp4"), "video").unwrap();
         let dir_path = Utf8PathBuf::from_path_buf(tempdir.path().join("images")).unwrap();
 
-        let items = plan_uploads(&dir_path, Some("blog/post"), None).unwrap();
+        let items = plan_uploads(std::slice::from_ref(&dir_path), Some("blog/post"), None).unwrap();
         let keys = items.into_iter().map(|item| item.key).collect::<Vec<_>>();
 
         assert_eq!(
@@ -485,5 +618,167 @@ mod tests {
                 "blog/post/nested/demo.mp4".to_string(),
             ]
         );
+    }
+
+    fn item(local: &str, key: &str) -> UploadItem {
+        UploadItem {
+            local_path: Utf8PathBuf::from(local),
+            key: key.to_string(),
+            renamed: false,
+        }
+    }
+
+    #[test]
+    fn plans_multiple_file_inputs_into_one_list() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let first = tempdir.path().join("cover.webp");
+        let second = tempdir.path().join("banner.png");
+        fs::write(&first, "a").unwrap();
+        fs::write(&second, "b").unwrap();
+        let paths = vec![
+            Utf8PathBuf::from_path_buf(first).unwrap(),
+            Utf8PathBuf::from_path_buf(second).unwrap(),
+        ];
+
+        let keys = plan_uploads(&paths, Some("blog"), None)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec!["blog/banner.png".to_string(), "blog/cover.webp".to_string()]
+        );
+    }
+
+    #[test]
+    fn plans_mixed_file_and_directory_inputs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let logo = tempdir.path().join("logo.svg");
+        fs::write(&logo, "svg").unwrap();
+        let icons = tempdir.path().join("icons");
+        fs::create_dir_all(&icons).unwrap();
+        fs::write(icons.join("a.png"), "a").unwrap();
+        let paths = vec![
+            Utf8PathBuf::from_path_buf(logo).unwrap(),
+            Utf8PathBuf::from_path_buf(icons).unwrap(),
+        ];
+
+        let keys = plan_uploads(&paths, None, None)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["a.png".to_string(), "logo.svg".to_string()]);
+    }
+
+    #[test]
+    fn reports_all_missing_paths_at_once() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let present = tempdir.path().join("here.png");
+        fs::write(&present, "x").unwrap();
+        let paths = vec![
+            Utf8PathBuf::from_path_buf(present).unwrap(),
+            Utf8PathBuf::from(format!("{}/missing-a.png", tempdir.path().display())),
+            Utf8PathBuf::from(format!("{}/missing-b.png", tempdir.path().display())),
+        ];
+
+        let error = plan_uploads(&paths, None, None).unwrap_err().to_string();
+
+        assert!(error.contains("missing-a.png"));
+        assert!(error.contains("missing-b.png"));
+    }
+
+    #[test]
+    fn rejects_custom_name_with_multiple_inputs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let first = tempdir.path().join("a.png");
+        let second = tempdir.path().join("b.png");
+        fs::write(&first, "a").unwrap();
+        fs::write(&second, "b").unwrap();
+        let paths = vec![
+            Utf8PathBuf::from_path_buf(first).unwrap(),
+            Utf8PathBuf::from_path_buf(second).unwrap(),
+        ];
+
+        let error = plan_uploads(&paths, None, Some("renamed.png"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("--name"));
+    }
+
+    #[test]
+    fn dedupe_drops_exact_duplicates() {
+        let items = vec![item("a/cover.png", "cover.png"), item("a/cover.png", "cover.png")];
+
+        let result = dedupe_and_disambiguate(items);
+
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].renamed);
+    }
+
+    #[test]
+    fn disambiguate_suffixes_colliding_keys() {
+        let items = vec![
+            item("a/logo.png", "logo.png"),
+            item("b/logo.png", "logo.png"),
+            item("c/logo.png", "logo.png"),
+        ];
+
+        let result = dedupe_and_disambiguate(items);
+        let keys = result.iter().map(|item| item.key.clone()).collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec![
+                "logo.png".to_string(),
+                "logo-1.png".to_string(),
+                "logo-2.png".to_string(),
+            ]
+        );
+        assert!(!result[0].renamed);
+        assert!(result[1].renamed);
+        assert!(result[2].renamed);
+    }
+
+    #[test]
+    fn disambiguate_skips_keys_already_taken() {
+        let items = vec![
+            item("a/logo.png", "logo.png"),
+            item("b/logo-1.png", "logo-1.png"),
+            item("c/logo.png", "logo.png"),
+        ];
+
+        let keys = dedupe_and_disambiguate(items)
+            .into_iter()
+            .map(|item| item.key)
+            .collect::<Vec<_>>();
+
+        assert!(keys.contains(&"logo.png".to_string()));
+        assert!(keys.contains(&"logo-1.png".to_string()));
+        assert!(keys.contains(&"logo-2.png".to_string()));
+    }
+
+    #[test]
+    fn splits_key_extension_for_suffixing() {
+        assert_eq!(split_key_extension("blog/logo.png"), ("blog/logo", Some("png")));
+        assert_eq!(split_key_extension("archive.tar.gz"), ("archive.tar", Some("gz")));
+        assert_eq!(split_key_extension("README"), ("README", None));
+        assert_eq!(split_key_extension("dir/.hidden"), ("dir/.hidden", None));
+    }
+
+    #[test]
+    fn suffixes_extensionless_key_at_the_end() {
+        let items = vec![item("a/README", "README"), item("b/README", "README")];
+
+        let keys = dedupe_and_disambiguate(items)
+            .into_iter()
+            .map(|item| item.key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["README".to_string(), "README-1".to_string()]);
     }
 }
